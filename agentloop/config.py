@@ -17,6 +17,10 @@ LABEL_PR = "agent:pr"                # marks PRs this system owns
 LABEL_NEEDS_HUMAN = "agent:needs-human"   # gave up / hit a cap / touched a guarded path
 LABEL_STOP = "agent:stop"            # kill switch: on the issue OR the repo's stop-issue
 
+# All five must exist in the repo. Each is load-bearing, and a missing one fails
+# quietly somewhere different, so `doctor` checks for them up front.
+CONTROL_LABELS = (LABEL_READY, LABEL_WIP, LABEL_PR, LABEL_NEEDS_HUMAN, LABEL_STOP)
+
 # Stamped into every comment the loop posts. "Did a human ask for changes?" has to
 # mean "a comment we did not write" — the loop pushes under your own account,
 # so authorship cannot distinguish us from him, and it read its own fix-up comment

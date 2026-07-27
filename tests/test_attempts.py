@@ -86,3 +86,28 @@ def test_last_unlabel_survives_a_gh_failure():
         raise gh.GhError("network")
     with patch.object(gh, "run", boom):
         assert gh.last_unlabel("o/r", 1, "agent:needs-human") == ""
+
+
+def test_pr_is_labelled_at_creation():
+    """An unlabelled PR is invisible to pr_watcher — never judged, never merged.
+    Two PRs sat open that way, so the label goes on in the create call itself."""
+    sent = []
+    with patch.object(gh, "run", lambda args, **kw: sent.append(args) or ""):
+        gh.create_pr("o/r", head="b", title="t", body="x", base="main",
+                     cwd=".", label="agent:pr")
+    assert "--label" in sent[0] and "agent:pr" in sent[0]
+
+
+def test_missing_labels_reports_only_absent_ones():
+    import json as _json
+    have = _json.dumps([{"name": "agent:ready"}, {"name": "agent:pr"}])
+    with patch.object(gh, "run", lambda args, **kw: have):
+        assert gh.missing_labels("o/r", ("agent:ready", "agent:pr", "agent:stop")) \
+            == ["agent:stop"]
+
+
+def test_missing_labels_stays_quiet_when_it_cannot_tell():
+    def boom(args, **kw):
+        raise gh.GhError("no network")
+    with patch.object(gh, "run", boom):
+        assert gh.missing_labels("o/r", ("agent:ready",)) == []

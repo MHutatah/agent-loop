@@ -181,7 +181,7 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace, logs: Path) -> lis
                          body=(f"Closes #{n}\n\nImplemented autonomously by **Codex**. "
                                f"Awaiting CI and a review from **Claude**.\n\n"
                                f"<!-- agent-loop:attempt --> {MARKER}"),
-                         base=repo.default_branch, cwd=str(path))
+                         base=repo.default_branch, cwd=str(path), label=LABEL_PR)
             gh.remove_label(repo.slug, n, LABEL_WIP)
             tmux.kill(n)
             (logs / f"issue-{n}.rc").unlink(missing_ok=True)

@@ -179,10 +179,33 @@ def merge_pr(repo: str, number: int, *, dry=False) -> None:
 
 
 def create_pr(repo: str, *, head: str, title: str, body: str, base: str,
-              cwd: str, dry=False) -> str:
-    return run(["pr", "create", "--repo", repo, "--head", head, "--base", base,
-                "--title", title, "--body", body],
-               cwd=cwd, dry=dry, mutating=True)
+              cwd: str, label: str = "", dry=False) -> str:
+    """Open the PR, labelled as ours in the same call.
+
+    The label is not decoration: pr_watcher only looks at PRs carrying it, so an
+    unlabelled PR is never judged and never merges. Labelling here rather than in
+    a follow-up call means a PR cannot exist in that invisible state.
+    """
+    args = ["pr", "create", "--repo", repo, "--head", head, "--base", base,
+            "--title", title, "--body", body]
+    if label:
+        args += ["--label", label]
+    return run(args, cwd=cwd, dry=dry, mutating=True)
+
+
+def missing_labels(repo: str, wanted: tuple[str, ...]) -> list[str]:
+    """Which of our control labels the repo doesn't have.
+
+    Every one of them is load-bearing, and a missing one fails quietly in a
+    different place each time, so doctor checks them up front.
+    """
+    try:
+        have = {lbl["name"] for lbl in json.loads(
+            run(["label", "list", "--repo", repo, "--limit", "200",
+                 "--json", "name"]) or "[]")}
+    except (GhError, json.JSONDecodeError):
+        return []                      # can't tell; don't cry wolf
+    return [w for w in wanted if w not in have]
 
 
 def issues_with_label(repo: str, label: str, limit: int = 20) -> list[dict]:

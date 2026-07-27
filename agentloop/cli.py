@@ -17,7 +17,7 @@ from pathlib import Path
 
 from agentloop import gh
 from agentloop.budget import Budget
-from agentloop.config import LABEL_PR, LABEL_READY, Config
+from agentloop.config import CONTROL_LABELS, LABEL_PR, LABEL_READY, Config
 from agentloop.watchers import issue_watcher, pr_watcher
 from agentloop.worktree import Workspace
 
@@ -58,8 +58,18 @@ def doctor(cfg: Config) -> int:
         except Exception as exc:                      # noqa: BLE001
             print(f"  WARN {name} — {exc}")
 
+    if not cfg.repos:
+        print("  MISS config — no repos in agentloop.toml; the loop will do nothing")
+        ok = False
     for r in cfg.repos:
         print(f"  repo {r.slug} auto_merge={r.auto_merge}")
+        missing = gh.missing_labels(r.slug, CONTROL_LABELS)
+        if missing:
+            print(f"  MISS labels — {r.slug} has no {', '.join(missing)}")
+            print(f"       gh label create {missing[0]} --repo {r.slug}")
+            ok = False
+        else:
+            print("  OK   labels — all control labels present")
     print(f"  workspace {WORKSPACE}")
     return 0 if ok else 1
 

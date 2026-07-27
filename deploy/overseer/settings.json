@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m agentloop:*)",
+      "Bash(tmux list-windows:*)",
+      "Bash(tmux list-sessions:*)",
+      "Bash(tmux capture-pane:*)",
+      "Bash(tail:*)",
+      "Bash(head:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(systemctl status:*)",
+      "Bash(systemctl is-active:*)",
+      "Bash(systemctl list-timers:*)",
+      "Bash(journalctl:*)",
+      "Bash(df:*)",
+      "Bash(free:*)",
+      "Bash(uptime:*)",
+      "Read(**)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(sudo rm:*)",
+      "Bash(git push --force:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh repo delete:*)",
+      "Read(./.env)",
+      "Read(**/.env)",
+      "Read(**/.credentials.json)",
+      "Read(**/auth.json)",
+      "Edit(**/agentloop/config.py)",
+      "Edit(**/.github/workflows/**)"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "_note": "defaultMode is bypassPermissions, which disables ALL checks \u2014 the deny list below is NOT enforced while it is on (verified with a canary). It is kept so the guards return if the mode is switched back. While bypass is on, CLAUDE.md is the only restraint."
+}

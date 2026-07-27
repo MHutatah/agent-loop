@@ -1,0 +1,146 @@
+"""Configuration — every knob that decides what the agents may touch.
+
+Deliberately explicit: this file is the security boundary. An autonomous loop with
+merge rights is only as safe as the limits declared here.
+"""
+from __future__ import annotations
+
+import os
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# ── labels: the control surface you drive from your phone ────────────────────
+LABEL_READY = "agent:ready"          # you add this -> an agent picks the issue up
+LABEL_WIP = "agent:working"          # the loop adds this so it never double-starts
+LABEL_PR = "agent:pr"                # marks PRs this system owns
+LABEL_NEEDS_HUMAN = "agent:needs-human"   # gave up / hit a cap / touched a guarded path
+LABEL_STOP = "agent:stop"            # kill switch: on the issue OR the repo's stop-issue
+
+# Stamped into every comment the loop posts. "Did a human ask for changes?" has to
+# mean "a comment we did not write" — the loop pushes under your own account,
+# so authorship cannot distinguish us from him, and it read its own fix-up comment
+# as a review request and re-fixed the same PR forever.
+MARKER = "<!-- agent-loop -->"
+
+# ── models ───────────────────────────────────────────────────────────────────
+# Codex implements (roomier ChatGPT Plus quota); Claude judges (few, high-leverage
+# calls) so the Claude Pro budget stays available for interactive work.
+#
+# `--sandbox workspace-write` lets the agent edit the worktree it is running in
+# but nothing outside it. (`--full-auto` is the deprecated spelling.) Codex also
+# refuses to run outside a git repo unless told otherwise — our worktrees are
+# repos, so that check is a useful backstop and is left on.
+IMPLEMENTER = ["codex", "exec", "--sandbox", "workspace-write"]
+
+# Judging is "does this diff meet the stated acceptance criteria" — a task Sonnet
+# does well, and on a Pro plan the quota difference per review is the difference
+# between a handful of PRs a day and many. Override with AGENTLOOP_JUDGE_MODEL
+# (e.g. "opus") when a repo needs a harsher reviewer.
+JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "sonnet")
+JUDGE = ["claude", "-p", "--output-format", "json", "--model", JUDGE_MODEL]
+
+
+@dataclass
+class Repo:
+    """One repository the loop is allowed to act on."""
+
+    slug: str                      # "owner/repo"
+    default_branch: str = "main"
+    auto_merge: bool = False
+    test_cmd: str = "python -m pytest -q"
+
+
+@dataclass
+class Config:
+    repos: list[Repo] = field(default_factory=list)
+
+    # Concurrency: two is a sane default for a small VPS that runs other things.
+    max_concurrent_agents: int = 2
+
+    # An agent gets this many attempts at one issue (initial + fixes) before the
+    # loop stops and hands it to a human. Without this a confused agent can burn
+    # a whole day's quota looping on the same failure.
+    max_attempts_per_issue: int = 3
+
+    # Wall-clock ceiling for a single agent invocation.
+    agent_timeout_s: int = 1800
+
+    # Judge calls share your Claude quota with your own interactive use, so the
+    # loop keeps a reserve: it stops judging well before the plan's limit rather
+    # than leaving you unable to use Claude yourself. Codex is unaffected — it
+    # implements on the separate ChatGPT subscription.
+    max_judge_calls: int = 12
+    judge_window_hours: float = 5.0
+
+    # Paths an agent may never change and still auto-merge. Touching one forces
+    # human review: these are the things that could disable the guardrails
+    # themselves or leak credentials.
+    guarded_paths: tuple[str, ...] = (
+        ".github/workflows/", ".github/actions/",
+        "LICENSE", "LICENSE-DATA",
+        ".env", "secrets", "deploy/",
+        "agentloop/config.py",
+    )
+
+    dry_run: bool = False
+
+    @classmethod
+    def load(cls) -> Config:
+        # Three layers, deliberately: which repos and whether they may auto-merge
+        # come from agentloop.toml (yours to declare); day-to-day tunables come
+        # from settings.json so they can be nudged from a phone; everything
+        # security-relevant stays here in code, where changing it needs a deploy.
+        from agentloop.settings import Settings
+
+        s = Settings.load()
+        return cls(
+            repos=_load_repos(),
+            max_judge_calls=s.max_judge_calls,
+            max_concurrent_agents=s.max_concurrent_agents,
+            max_attempts_per_issue=s.max_attempts_per_issue,
+            dry_run=os.environ.get("AGENTLOOP_DRY_RUN", "") == "1",
+        )
+
+
+def config_path() -> Path:
+    """Where the repo list lives. Explicit env var, else next to the project,
+    else the XDG-ish location — so a clone works with no arguments."""
+    env = os.environ.get("AGENTLOOP_CONFIG")
+    if env:
+        return Path(env)
+    local = Path(__file__).resolve().parent.parent / "agentloop.toml"
+    if local.exists():
+        return local
+    return Path.home() / ".config" / "agentloop" / "config.toml"
+
+
+def _load_repos() -> list[Repo]:
+    """Repos the loop may act on. Empty is a valid, safe answer: with no config
+    the loop simply does nothing rather than guessing at a repository."""
+    path = config_path()
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    out = []
+    for r in data.get("repo", []):
+        slug = r.get("slug")
+        if not slug:
+            continue
+        out.append(Repo(
+            slug=slug,
+            default_branch=r.get("default_branch", "main"),
+            # auto_merge is opt-in per repo: letting an agent merge unattended
+            # should always be a decision someone typed, never a default.
+            auto_merge=bool(r.get("auto_merge", False)),
+            test_cmd=r.get("test_cmd", "python -m pytest -q"),
+        ))
+    return out
+
+
+def touches_guarded_path(files: list[str], cfg: Config) -> list[str]:
+    """Which changed files fall under a guarded path (blocks auto-merge)."""
+    return [f for f in files
+            if any(f == g or f.startswith(g) for g in cfg.guarded_paths)]

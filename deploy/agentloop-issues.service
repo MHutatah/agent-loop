@@ -1,0 +1,13 @@
+[Unit]
+Description=agent-loop: start agents on ready GitHub issues
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__HOME__/agent-loop
+Environment=AGENTLOOP_WORKSPACE=__WORKSPACE__
+EnvironmentFile=__HOME__/agent-loop/.env
+ExecStart=/usr/bin/python3 -m agentloop issues
+# One tick must never wedge the timer.
+TimeoutStartSec=3600

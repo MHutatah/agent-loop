@@ -1,0 +1,25 @@
+[Unit]
+Description=agent-loop: interactive web terminal + overseer on the tailnet
+After=network-online.target tailscaled.service
+
+[Service]
+User=__USER__
+Environment=AGENTLOOP_WORKSPACE=__WORKSPACE__
+# Bound to ONE interface — never 0.0.0.0. This terminal is WRITABLE (you talk to
+# the overseer through it), so that binding is the ONLY thing protecting a shell
+# on this box. Defaults to loopback; install.sh uses tailscale0 if you have a
+# tailnet. Never expose it through a public tunnel.
+ExecStartPre=/usr/bin/bash -lc '__HOME__/agent-loop/deploy/session.sh'
+ExecStart=/usr/bin/ttyd --port 7681 --interface __IFACE__ --writable \
+    --client-option fontSize=10 \
+    --client-option 'theme={"background":"#0b1221"}' \
+    --client-option rendererType=canvas \
+    --client-option 'lineHeight=1.1' \
+    --client-option 'scrollback=5000' \
+    --ping-interval 30 \
+    tmux attach-session -t agents
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

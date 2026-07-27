@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll for ready issues
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

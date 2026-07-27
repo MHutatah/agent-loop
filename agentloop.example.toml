@@ -1,0 +1,26 @@
+# Which repositories the loop may act on.
+#
+# This file answers "what am I allowed to touch". Day-to-day tunables (budget,
+# concurrency) live in the console UI; the guardrails themselves live in code,
+# where changing them needs a deploy — see agentloop/config.py.
+#
+# Copy to agentloop.toml and edit. With no config the loop does nothing, which is
+# the correct behaviour for an unconfigured autonomous agent.
+
+[[repo]]
+slug           = "you/your-repo"
+default_branch = "main"
+
+# Opt-in, and deliberately off by default: this lets an agent merge to your
+# default branch with no human in the loop. Turn it on only once you have
+# watched the loop work and trust the gate — CI green AND the judge passing AND
+# no guarded path touched AND no human comment.
+auto_merge     = false
+
+# Run before opening a PR. The agent is told to make this pass.
+test_cmd       = "python -m pytest -q"
+
+# Add more repos by repeating the block.
+# [[repo]]
+# slug       = "you/another-repo"
+# auto_merge = false

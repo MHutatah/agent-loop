@@ -1,0 +1,17 @@
+[Unit]
+Description=agent-loop: mobile web console on the tailnet
+After=network-online.target tailscaled.service
+
+[Service]
+User=__USER__
+WorkingDirectory=__HOME__/agent-loop
+Environment=AGENTLOOP_WORKSPACE=__WORKSPACE__
+# Bind to LOOPBACK only. `tailscale serve` fronts this with HTTPS on the ts.net
+# name and is the sole way in, so the console is not directly reachable even from
+# the tailnet — one authenticated door instead of two.
+ExecStart=/usr/bin/python3 -m agentloop.console __BIND__ 7682
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

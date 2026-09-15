@@ -396,6 +396,18 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
 
     # CI red or a human asked for changes -> put an agent back on it
     problems: list[str] = []
+    if (pr.get("mergeable") or "").upper() == "CONFLICTING":
+        # A CONFLICTING PR WAS A DEAD END. gate.decide refuses it with "merge
+        # conflict" and nothing ever rebased it, so the PR sat open forever with
+        # a correct reason and no route out. That is the normal outcome as soon
+        # as two agents work one area in parallel: the first merge conflicts the
+        # second, which is exactly what happened to ipa-community #91 the moment
+        # #90 went in. Hand it to the fixer instead of holding it.
+        problems.append(
+            f"This branch conflicts with origin/{repo.default_branch}. Fetch and "
+            "rebase onto it, resolve every conflict by KEEPING BOTH SIDES' "
+            "intent rather than discarding either, and do not weaken or delete a "
+            "test to make the merge simpler. Then re-run the suite.")
     if checks == "fail":
         problems.append("CI is failing — read the failing job output and fix it.")
     if human:
@@ -471,6 +483,10 @@ def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
             path, _ = ws.create(num, pr["title"], repo.default_branch)
             from agentloop.worktree import git
             git(["checkout", pr["headRefName"]], path)
+        # Make origin/<base> present in the worktree so the agent can rebase.
+        if not cfg.dry_run:
+            from agentloop.worktree import git
+            git(["fetch", "origin", repo.default_branch], path, check=False)
         prompt = FIX_PROMPT.format(number=num, title=issue["title"],
                                    body=issue["body"][:4000],
                                    problems="\n".join(f"- {p}" for p in problems))

@@ -342,3 +342,37 @@ def test_an_issue_with_an_open_pr_is_not_restarted():
 def test_no_open_prs_claims_nothing():
     with patch("agentloop.gh.open_prs", return_value=[]):
         assert gh.issues_with_open_pr("o/r", "agent:pr") == set()
+
+
+def test_a_conflicting_pr_is_handed_to_the_fixer_not_held_forever(tmp_path):
+    """A CONFLICTING PR WAS A DEAD END. gate.decide refuses it with "merge
+    conflict" and nothing rebased it, so it sat open forever with a correct
+    reason and no route out. That is the normal outcome the moment two agents
+    work one area in parallel: ipa-community #91 conflicted the instant #90
+    merged, and both were mergeable individually.
+    """
+    from agentloop.config import Repo
+    from agentloop.watchers import _handle_pr
+
+    ws = Workspace(tmp_path, "o/r")
+    ws.logs.mkdir(parents=True)
+    cfg, repo = Config(), Repo(slug="o/r", default_branch="main")
+    pr = {"number": 91, "title": "t", "body": "Closes #89", "labels": [],
+          "mergeable": "CONFLICTING", "headRefName": "agent/89-x", "headRefOid": "abc"}
+
+    with patch("agentloop.gh.pr_checks_state", return_value="pass"), \
+         patch("agentloop.gh.pr_review_comments", return_value=[]), \
+         patch("agentloop.gh.pr_files", return_value=["lib/glossary.ts"]), \
+         patch("agentloop.gh.last_unlabel", return_value=""), \
+         patch("agentloop.gh.comment"), \
+         patch("agentloop.watchers._run_fixer") as fixer, \
+         patch("agentloop.judge.judge_pr") as judge:
+        out = _handle_pr(cfg, repo, ws, object(), pr)
+
+    fixer.assert_called_once()
+    problems = fixer.call_args.args[6]
+    assert any("rebase" in p.lower() for p in problems), problems
+    assert any("KEEPING BOTH" in p for p in problems), problems
+    # and it must not spend a judge call on a branch that cannot merge
+    judge.assert_not_called()
+    assert any("fixing" in line for line in out), out

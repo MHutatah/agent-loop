@@ -91,6 +91,21 @@ def open_prs(repo: str, label: str) -> list[dict]:
     ])
 
 
+def pr_for_branch(repo: str, branch: str) -> dict | None:
+    """The open PR whose head is this branch, if there already is one.
+
+    Makes collection idempotent. The collector commits, pushes, then opens the
+    PR, and those are three separate network calls with no transaction around
+    them: when the third failed, the next tick had no way to tell "already
+    pushed, PR still missing" from "nothing happened", and guessed wrong in the
+    direction that blames the human. Asking GitHub is cheap and it is the only
+    authority on whether the PR exists.
+    """
+    rows = _json(["pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+                  "--limit", "1", "--json", "number,url,labels"])
+    return rows[0] if rows else None
+
+
 def pr_diff(repo: str, number: int, max_chars: int = 120_000) -> str:
     """The diff, as text — the judge reads this instead of cloning anything."""
     return run(["pr", "diff", str(number), "--repo", repo])[:max_chars]

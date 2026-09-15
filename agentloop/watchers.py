@@ -24,6 +24,7 @@ from agentloop.config import (
     MARKER,
     Config,
     Repo,
+    touches_guarded_path,
 )
 from agentloop.gate import decide
 from agentloop.judge import Verdict, judge_pr
@@ -97,23 +98,36 @@ def _attempts(issue_body_comments: list[dict], since: str = "") -> int:
 def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
     """One non-blocking pass: collect finished agents, then start new ones.
 
-    Collection runs first so a freed slot is reused within the same tick.
+    Collection runs first so a freed slot is reused within the same tick, then
+    the reaper, so an issue stranded by a reboot is available again before this
+    pass decides what to start.
+
+    Capacity is enforced here rather than by the caller: global and per-repo
+    ceilings both apply, which is what stops one project taking the pool.
     """
     out: list[str] = []
     ws = Workspace(workspace_root, repo.slug)
-    logs = Path(workspace_root) / "logs"
+    logs = ws.logs
+    logs.mkdir(parents=True, exist_ok=True)
 
-    out += _collect_finished(cfg, repo, ws, logs)
+    out += _collect_finished(cfg, repo, ws)
+    out += _reap(cfg, repo, ws)
 
     issues = gh.ready_issues(repo.slug, LABEL_READY, LABEL_WIP, LABEL_STOP)
     if not issues:
         out.append("no ready issues")
         return out
 
+    # Capacity is global AND per repo. Global alone let whichever repository the
+    # config happened to list first take every slot on a busy morning, so the
+    # others were not slow, they were silent.
     running = tmux.live_windows() if not cfg.dry_run else []
-    free_slots = cfg.max_concurrent_agents - len(running)
+    mine = [n for k, n in running if k == ws.key]
+    free_slots = min(cfg.max_concurrent_agents - len(running),
+                     cfg.max_concurrent_per_repo - len(mine))
     if free_slots <= 0:
-        out.append(f"at capacity ({len(running)}/{cfg.max_concurrent_agents} agents live)")
+        out.append(f"at capacity ({len(running)}/{cfg.max_concurrent_agents} global, "
+                   f"{len(mine)}/{cfg.max_concurrent_per_repo} for this repo)")
         return out
 
     ws.ensure_clone(dry=cfg.dry_run)
@@ -124,11 +138,12 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
             prompt = IMPLEMENT_PROMPT.format(
                 number=n, title=title, body=(issue.get("body") or "")[:8000])
             gh.add_label(repo.slug, n, LABEL_WIP, dry=cfg.dry_run)
+            window = tmux.window_name(ws.key, n)
             if cfg.dry_run:
-                out.append(f"#{n} would spawn agent in tmux window issue-{n}")
+                out.append(f"#{n} would spawn agent in tmux window {window}")
                 continue
-            tmux.spawn(n, IMPLEMENTER, prompt, cwd=path, log_dir=logs)
-            out.append(f"#{n} agent started (watch: tmux window issue-{n}): {title}")
+            tmux.spawn(ws.key, n, IMPLEMENTER, prompt, cwd=path, log_dir=logs)
+            out.append(f"#{n} agent started (watch: tmux window {window}): {title}")
         except Exception as exc:                     # noqa: BLE001 — one issue must not sink the tick
             log.exception("issue #%s failed to start", n)
             gh.remove_label(repo.slug, n, LABEL_WIP, dry=cfg.dry_run)
@@ -136,73 +151,159 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
     return out
 
 
-def _collect_finished(cfg: Config, repo: Repo, ws: Workspace, logs: Path) -> list[str]:
+def _reap(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
+    """Release issues GitHub thinks are in progress that nothing is working on.
+
+    THE LOST-ISSUE BUG LIVED HERE, in the absence of this function. `spawn`
+    deletes the `.rc` status file before starting the agent and writes it on
+    completion, and the collector only ever looked at issues that had a `.rc`
+    file or a live tmux window. Kill tmux between those two moments, whether by a
+    reboot, `kill-server` or the OOM killer, and an issue has neither. It was therefore
+    never collected and never released, while `agent:working` stayed on it
+    forever and `ready_issues` excludes that label, so it could never be picked
+    up again either. The work simply stopped existing, silently, which is the
+    worst failure this system can have: it is indistinguishable from an idle
+    loop.
+
+    GitHub's labels are the authority here, not the filesystem, because they are
+    the only part of the state that survives the box.
+    """
+    out: list[str] = []
+    if cfg.dry_run or not tmux.available():
+        return out
+    for issue in gh.issues_with_label(repo.slug, LABEL_WIP, limit=50):
+        n = issue.get("number")
+        if not n or tmux.is_running(ws.key, n):
+            continue
+        if (ws.logs / f"issue-{n}.rc").exists():
+            continue                       # finished; the collector owns it
+        path = ws.trees / f"issue-{n}"
+        if path.exists() and ws.ahead_of(path, repo.default_branch) > 0:
+            continue                       # has real work; the collector owns it
+        _release(repo, ws, n)
+        out.append(f"#{n} was stranded with {LABEL_WIP} and nothing running "
+                   f"and was released for a later tick")
+    return out
+
+
+def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
     """Turn completed agent runs into pull requests."""
     out: list[str] = []
     if cfg.dry_run or not tmux.available():
         return out
+    logs = ws.logs
 
     for n in _pending_issues(logs):
-        if tmux.is_running(n):
+        if tmux.is_running(ws.key, n):
             continue
         rc = tmux.exit_code(n, logs)
-        if rc is None:
-            continue                       # window died without writing a code
         path = ws.trees / f"issue-{n}"
+        committed = ws.ahead_of(path, repo.default_branch) if path.exists() else 0
+
+        # Resume a half-collected run BEFORE reading the exit code. Commits on
+        # the branch are proof the agent succeeded, whatever happened to the
+        # status file afterwards, and the previous order of these checks is what
+        # let a failed `pr create` be reported as an under-specified issue.
+        if rc is None and committed == 0:
+            continue                       # still starting, or the reaper's job
+
         text = tmux.output(n, logs)
 
-        if rc != 0:
+        if rc not in (None, 0) and committed == 0:
             # A usage limit is temporary: release the issue untouched so a later
             # tick retries it, rather than burning an attempt or calling for help.
             if looks_limited(text):
-                _release(repo, ws, logs, n)
+                _release(repo, ws, n)
                 out.append(f"#{n} agent hit a usage limit — will retry later")
             else:
-                _release(repo, ws, logs, n,
+                _release(repo, ws, n,
                          reason=f"The agent exited with code {rc}. Last output:\n\n"
                                 f"```\n{text[-1500:]}\n```")
                 out.append(f"#{n} agent failed (rc={rc})")
             continue
 
-        if not path.exists() or not ws.has_changes(path):
-            _release(repo, ws, logs, n,
+        if not path.exists():
+            _release(repo, ws, n,
+                     reason="The worktree is gone, so there is nothing to collect. "
+                            "Re-label when you want this retried.")
+            out.append(f"#{n} worktree missing")
+            continue
+
+        if committed == 0 and not ws.has_changes(path):
+            # Only NOW is this diagnosis honest: nothing committed and nothing
+            # pending really is an agent that did nothing.
+            _release(repo, ws, n,
                      reason="The agent produced no changes — the issue may be "
                             "under-specified. Handing back to a human.")
             out.append(f"#{n} no changes produced")
+            continue
+
+        # CONTAINMENT BEFORE THE PUSH, not at merge time. gate.py checks guarded
+        # paths when deciding whether to merge, which is too late to matter: the
+        # branch is on GitHub by then. If the agent wrote a credential while
+        # testing, refusing the merge does not unpublish it.
+        guarded = touches_guarded_path(
+            ws.changed_paths(path, repo.default_branch), cfg)
+        if guarded:
+            _release(repo, ws, n,
+                     reason=("Refusing to push: this change touches guarded "
+                             f"path(s) `{'`, `'.join(guarded[:5])}`. Nothing was "
+                             "pushed, so review the worktree on the box rather "
+                             "than a branch."),
+                     keep_tree=True)
+            out.append(f"#{n} blocked before push: {', '.join(guarded[:3])}")
             continue
 
         try:
             title = gh.run(["issue", "view", str(n), "--repo", repo.slug,
                             "--json", "title", "--jq", ".title"])
             branch = branch_name(n, title)
-            ws.commit_all(path, f"{title}\n\nCloses #{n}\n\nImplemented by Codex via agent-loop.")
-            ws.push(path, branch)
-            gh.create_pr(repo.slug, head=branch, title=title,
-                         body=(f"Closes #{n}\n\nImplemented autonomously by **Codex**. "
-                               f"Awaiting CI and a review from **Claude**.\n\n"
-                               f"<!-- agent-loop:attempt --> {MARKER}"),
-                         base=repo.default_branch, cwd=str(path), label=LABEL_PR)
+            if ws.has_changes(path):
+                ws.commit_all(path, f"{title}\n\nCloses #{n}\n\n"
+                                    f"Implemented by Codex via agent-loop.")
+            ws.push(path, branch)          # force-with-lease: safe to repeat
+            existing = gh.pr_for_branch(repo.slug, branch)
+            if existing:
+                # A previous tick pushed and then failed to finish. Adopt its PR
+                # instead of failing forever on "a pull request already exists".
+                if LABEL_PR not in {lbl["name"] for lbl in existing.get("labels", [])}:
+                    gh.add_label(repo.slug, existing["number"], LABEL_PR)
+                out.append(f"#{n} PR #{existing['number']} already open — adopted")
+            else:
+                gh.create_pr(repo.slug, head=branch, title=title,
+                             body=(f"Closes #{n}\n\nImplemented autonomously by "
+                                   f"**Codex**. Awaiting CI and a review from "
+                                   f"**Claude**.\n\n"
+                                   f"<!-- agent-loop:attempt --> {MARKER}"),
+                             base=repo.default_branch, cwd=str(path), label=LABEL_PR)
+                out.append(f"#{n} PR opened on {branch}")
             gh.remove_label(repo.slug, n, LABEL_WIP)
-            tmux.kill(n)
+            tmux.kill(ws.key, n)
             (logs / f"issue-{n}.rc").unlink(missing_ok=True)
-            out.append(f"#{n} PR opened on {branch}")
         except Exception as exc:                     # noqa: BLE001
+            # Deliberately leaves the `.rc` in place so the next tick retries.
+            # That retry is only safe because every step above is idempotent.
             log.exception("collecting issue #%s failed", n)
             out.append(f"#{n} collect error: {exc}")
     return out
 
 
-def _release(repo: Repo, ws: Workspace, logs: Path, n: int,
-             reason: str | None = None) -> None:
+def _release(repo: Repo, ws: Workspace, n: int, reason: str | None = None,
+             *, keep_tree: bool = False) -> None:
     """Give an issue back. With a reason it's escalated to a human; without one
-    (a rate limit) it simply becomes available again for a later tick."""
+    (a rate limit, or the reaper) it simply becomes available again.
+
+    `keep_tree` preserves the worktree for the one case where it is the only
+    copy of the work: a change blocked before it was ever pushed.
+    """
     gh.remove_label(repo.slug, n, LABEL_WIP)
     if reason:
         gh.add_label(repo.slug, n, LABEL_NEEDS_HUMAN)
         gh.comment(repo.slug, n, reason)
-    tmux.kill(n)
-    (logs / f"issue-{n}.rc").unlink(missing_ok=True)
-    ws.remove(n)
+    tmux.kill(ws.key, n)
+    (ws.logs / f"issue-{n}.rc").unlink(missing_ok=True)
+    if not keep_tree:
+        ws.remove(n)
 
 
 def _pending_issues(logs: Path) -> list[int]:
@@ -285,7 +386,10 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
             if not budget.allow():
                 out.append(f"PR #{num} judge budget spent ({budget.status()})")
                 return out
-            verdict = judge_pr(issue, gh.pr_diff(repo.slug, num), dry=cfg.dry_run)
+            tree = ws.trees / f"issue-{num}"
+            verdict = judge_pr(issue, gh.pr_diff(repo.slug, num),
+                               cwd=str(tree) if tree.exists() else None,
+                               dry=cfg.dry_run)
             if verdict.limited:
                 out.append(f"PR #{num} judge rate-limited — will retry")
                 return out
@@ -317,7 +421,7 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
         gh.merge_pr(repo.slug, num, dry=cfg.dry_run)
         # The work shipped: drop its log so the console does not carry a card for
         # every issue ever run.
-        tmux.discard_log(num, Path.home() / "agent-loop-work" / "logs")
+        tmux.discard_log(num, ws.logs)
         ws.remove(num, dry=cfg.dry_run)
         out.append(f"PR #{num} MERGED — {gate.reason}")
     else:

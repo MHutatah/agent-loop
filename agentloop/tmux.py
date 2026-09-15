@@ -52,27 +52,47 @@ def ensure_session() -> None:
         _tmux(["set-option", "-t", SESSION, "remain-on-exit", "on"])
 
 
-def window_name(issue: int) -> str:
+def window_name(key: str, issue: int) -> str:
+    """The tmux window for one issue of ONE repository.
+
+    The session is global while worktrees and logs are per-repo, so the window
+    name is the one identifier that has to carry the repository. It did not:
+    windows were named `issue-<n>`, so repo A's issue #12 and repo B's issue #12
+    were the same window. tmux permits duplicate window names, so nothing
+    errored: `is_running` matched whichever came first, `exit_code` read the
+    other one's status file, and the collector opened a pull request for one
+    repo's issue against the other. Two digits of shared issue number were
+    enough to cross the wires.
+
+    `--` rather than `:` or `.`, both of which are tmux target separators.
+    """
+    return f"{key}--{issue}"
+
+
+def _stem(issue: int) -> str:
+    """Log file stem. Deliberately NOT window_name: log directories are already
+    per-repo, so the key would be redundant in the path and would silently
+    orphan every log written before this change."""
     return f"issue-{issue}"
 
 
-def is_running(issue: int) -> bool:
+def is_running(key: str, issue: int) -> bool:
     rc, out = _tmux(["list-windows", "-t", SESSION, "-F", "#{window_name} #{pane_dead}"])
     if rc != 0:
         return False
     for line in out.splitlines():
         name, _, dead = line.partition(" ")
-        if name == window_name(issue):
+        if name == window_name(key, issue):
             return dead.strip() == "0"
     return False
 
 
-def has_window(issue: int) -> bool:
+def has_window(key: str, issue: int) -> bool:
     rc, out = _tmux(["list-windows", "-t", SESSION, "-F", "#{window_name}"])
-    return rc == 0 and window_name(issue) in out.split()
+    return rc == 0 and window_name(key, issue) in out.split()
 
 
-def spawn(issue: int, command: list[str], prompt: str, cwd: str | Path,
+def spawn(key: str, issue: int, command: list[str], prompt: str, cwd: str | Path,
           log_dir: str | Path) -> Path:
     """Start an agent in its own window. Returns the path to its status file.
 
@@ -82,9 +102,9 @@ def spawn(issue: int, command: list[str], prompt: str, cwd: str | Path,
     ensure_session()
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    out_file = log_dir / f"{window_name(issue)}.log"
-    rc_file = log_dir / f"{window_name(issue)}.rc"
-    prompt_file = log_dir / f"{window_name(issue)}.prompt"
+    out_file = log_dir / f"{_stem(issue)}.log"
+    rc_file = log_dir / f"{_stem(issue)}.rc"
+    prompt_file = log_dir / f"{_stem(issue)}.prompt"
     prompt_file.write_text(prompt, encoding="utf-8")
     rc_file.unlink(missing_ok=True)
 
@@ -96,15 +116,16 @@ def spawn(issue: int, command: list[str], prompt: str, cwd: str | Path,
         f"echo ${{PIPESTATUS[0]}} > {shlex.quote(str(rc_file))}"
     )
     kill(issue)
-    _tmux(["new-window", "-d", "-t", f"{SESSION}:", "-n", window_name(issue),
+    _tmux(["new-window", "-d", "-t", f"{SESSION}:", "-n", window_name(key, issue),
            "-c", str(cwd), "bash", "-lc", inner], check=True)
-    log.info("spawned agent for issue #%s in tmux window %s", issue, window_name(issue))
+    log.info("spawned agent for %s#%s in tmux window %s",
+             key, issue, window_name(key, issue))
     return rc_file
 
 
 def exit_code(issue: int, log_dir: str | Path) -> int | None:
     """The finished run's exit code, or None if it's still going."""
-    rc_file = Path(log_dir) / f"{window_name(issue)}.rc"
+    rc_file = Path(log_dir) / f"{_stem(issue)}.rc"
     if not rc_file.exists():
         return None
     try:
@@ -120,7 +141,7 @@ def output(issue: int, log_dir: str | Path, tail: int = 20000) -> str:
     hundreds of KB, and the console renders every card on every request — reading
     each one in full was the dominant cost of a page load.
     """
-    f = Path(log_dir) / f"{window_name(issue)}.log"
+    f = Path(log_dir) / f"{_stem(issue)}.log"
     if not f.exists():
         return ""
     try:
@@ -133,7 +154,7 @@ def output(issue: int, log_dir: str | Path, tail: int = 20000) -> str:
 
 
 def log_size(issue: int, log_dir: str | Path) -> int:
-    f = Path(log_dir) / f"{window_name(issue)}.log"
+    f = Path(log_dir) / f"{_stem(issue)}.log"
     try:
         return f.stat().st_size
     except OSError:
@@ -145,24 +166,35 @@ def discard_log(issue: int, log_dir: str | Path) -> None:
     issue the loop has ever run stays on the console forever, and both page
     weight and per-render disk reads grow without bound."""
     for suffix in (".log", ".rc", ".prompt"):
-        (Path(log_dir) / f"{window_name(issue)}{suffix}").unlink(missing_ok=True)
+        (Path(log_dir) / f"{_stem(issue)}{suffix}").unlink(missing_ok=True)
 
 
-def kill(issue: int) -> None:
-    _tmux(["kill-window", "-t", f"{SESSION}:{window_name(issue)}"])
+def kill(key: str, issue: int) -> None:
+    _tmux(["kill-window", "-t", f"{SESSION}:{window_name(key, issue)}"])
 
 
-def live_windows() -> list[int]:
-    """Issue numbers with a window that hasn't exited."""
+def live_windows() -> list[tuple[str, int]]:
+    """Every live agent as (repo key, issue), across all repositories.
+
+    Returns pairs rather than issue numbers because capacity is global while
+    issue numbers are not unique across repos: as a bare list of ints, two
+    repos each running their own #12 counted as one agent, so the concurrency
+    cap leaked a slot for every collision.
+    """
     rc, out = _tmux(["list-windows", "-t", SESSION, "-F", "#{window_name} #{pane_dead}"])
     if rc != 0:
         return []
-    live = []
+    live: list[tuple[str, int]] = []
     for line in out.splitlines():
         name, _, dead = line.partition(" ")
-        if name.startswith("issue-") and dead.strip() == "0":
-            try:
-                live.append(int(name.split("-", 1)[1]))
-            except ValueError:
-                continue
+        if dead.strip() != "0" or "--" not in name:
+            continue
+        key, _, num = name.rpartition("--")
+        if key and num.isdigit():
+            live.append((key, int(num)))
     return live
+
+
+def live_for(key: str) -> list[int]:
+    """Live issue numbers for one repository."""
+    return [n for k, n in live_windows() if k == key]

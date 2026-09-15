@@ -20,7 +20,8 @@ PATH = Path.home() / "agent-loop-work" / "settings.json"
 # push the judge budget somewhere that would drain the plan.
 BOUNDS = {
     "max_judge_calls": (0, 60),
-    "max_concurrent_agents": (1, 4),
+    "max_concurrent_agents": (1, 8),
+    "max_concurrent_per_repo": (1, 4),
     "max_attempts_per_issue": (1, 6),
 }
 
@@ -29,6 +30,9 @@ BOUNDS = {
 class Settings:
     max_judge_calls: int = 12
     max_concurrent_agents: int = 2
+    # Per repository, so one busy project cannot take every slot. Raising the
+    # global cap without this just moves the starvation rather than fixing it.
+    max_concurrent_per_repo: int = 1
     max_attempts_per_issue: int = 3
 
     @classmethod

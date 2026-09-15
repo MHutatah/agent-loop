@@ -115,7 +115,7 @@ def spawn(key: str, issue: int, command: list[str], prompt: str, cwd: str | Path
         f"< /dev/null 2>&1 | tee {shlex.quote(str(out_file))}; "
         f"echo ${{PIPESTATUS[0]}} > {shlex.quote(str(rc_file))}"
     )
-    kill(issue)
+    kill(key, issue)
     _tmux(["new-window", "-d", "-t", f"{SESSION}:", "-n", window_name(key, issue),
            "-c", str(cwd), "bash", "-lc", inner], check=True)
     log.info("spawned agent for %s#%s in tmux window %s",

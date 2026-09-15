@@ -42,8 +42,39 @@ from agentloop.config import (
 )
 from agentloop.settings import BOUNDS, Settings
 from agentloop.usage import codex_usage
+from agentloop.worktree import Workspace
 
 WORKSPACE = Path.home() / "agent-loop-work"
+
+
+def _repo_dirs(cfg: Config) -> list[tuple[str, str, Path]]:
+    """(key, slug, logs dir) for every configured repo.
+
+    The console used to read one logs directory at `WORKSPACE/logs` and key
+    everything by bare issue number, because there was only ever one repo. Logs
+    are now per-repo under `repos/<owner>__<name>/logs`, and an issue number is
+    no longer unique, so every card, log view and action carries the key.
+    """
+    out = []
+    for r in cfg.repos:
+        ws = Workspace(WORKSPACE, r.slug)
+        out.append((ws.key, r.slug, ws.logs))
+    return out
+
+
+def _split_target(cfg: Config, arg: str) -> tuple[str, str, int] | None:
+    """Parse "<key>/<issue>", or a bare issue number for a single-repo setup."""
+    key, _, num = arg.rpartition("/")
+    if not num.isdigit():
+        return None
+    n = int(num)
+    for k, slug, _logs in _repo_dirs(cfg):
+        if k == key:
+            return k, slug, n
+    if not key and len(cfg.repos) == 1:
+        k, slug, _logs = _repo_dirs(cfg)[0]
+        return k, slug, n
+    return None
 MAX_CARDS = 8              # newest N; the rest are history, not status
 LOG_TAIL = 60_000          # what /log/<n> serves — read by seek, not full file
 PREVIEW_TAIL = 2_000       # the "last output" line on a card
@@ -388,24 +419,34 @@ def _usage_panel(cfg: Config, budget: Budget, sett: Settings) -> str:
       </div></div></details>"""
 
 
-def _agent_cards(logs: Path, st: State) -> str:
-    """Newest N only. Rendering one card per issue ever run made both page weight
-    and per-render disk reads grow without bound."""
+def _agent_cards(cfg: Config, st: State) -> str:
+    """Newest N only, across every repository. Rendering one card per issue ever
+    run made both page weight and per-render disk reads grow without bound."""
     live = set(tmux.live_windows())
-    try:
-        known = {int(f.stem.split("-")[1]) for f in logs.glob("issue-*.log")
-                 if f.stem.split("-")[1].isdigit()}
-    except OSError:
-        known = set()
-    seen = sorted(known | live, reverse=True)
+    known: set[tuple[str, int]] = set()
+    logs_for: dict[str, Path] = {}
+    for key, _slug, logs in _repo_dirs(cfg):
+        logs_for[key] = logs
+        try:
+            for f in logs.glob("issue-*.log"):
+                num = f.stem.split("-")[1]
+                if num.isdigit():
+                    known.add((key, int(num)))
+        except OSError:
+            continue
+    # newest first, and an issue number sorts within its own repo
+    seen = sorted(known | live, key=lambda t: (t[1], t[0]), reverse=True)
     hidden = max(0, len(seen) - MAX_CARDS)
     seen = seen[:MAX_CARDS]
     if not seen:
         return '<div class="empty">No agents have run yet.</div>'
 
     out = []
-    for n in seen:
-        running = n in live
+    for key, n in seen:
+        logs = logs_for.get(key, WORKSPACE / "logs")
+        target = f"{key}/{n}"
+        shown = n if len(cfg.repos) < 2 else f"{key.split('__')[-1]} #{n}"
+        running = (key, n) in live
         tail = tmux.output(n, logs, tail=PREVIEW_TAIL)
         lines = [s for s in tail.splitlines() if s.strip()]
         preview = "\n".join(lines)[-260:] or "…"
@@ -414,14 +455,14 @@ def _agent_cards(logs: Path, st: State) -> str:
         cls = "live" if running else ("bad" if failed else "done")
         state = "working" if running else ("finished with errors" if failed
                                            else "finished")
-        kill = (f'<form method=post action="/do/kill/{n}" style="flex:1">'
+        kill = (f'<form method=post action="/do/kill/{target}" style="flex:1">'
                 f'<button class="danger" style="width:100%">Stop this agent</button>'
                 f'</form>') if running else ""
         out.append(f"""<div class="card">
-          <h2><span class="dot {cls}" aria-hidden="true"></span>issue #{n}</h2>
+          <h2><span class="dot {cls}" aria-hidden="true"></span>issue #{shown}</h2>
           <div class="meta">{state} &middot; {tmux.log_size(n, logs) // 1024} KB log</div>
           <div class="last">{html.escape(preview)}</div>
-          <a class="more" href="/log/{n}">Full log &rsaquo;</a>
+          <a class="more" href="/log/{target}">Full log &rsaquo;</a>
           <div class="row" style="margin:8px 0 0">{kill}</div>
         </div>""")
     if hidden:
@@ -475,7 +516,7 @@ def render(cfg: Config, flash: str = "", ok: bool = True) -> str:
     <a class="btn" href="/term">Terminal</a>
   </div>
   {_pr_cards(st)}
-  {_agent_cards(WORKSPACE / 'logs', st)}
+  {_agent_cards(cfg, st)}
   {_usage_panel(cfg, budget, sett)}
 </main>
 <div class="bottom">
@@ -506,8 +547,12 @@ def render(cfg: Config, flash: str = "", ok: bool = True) -> str:
 </script></body></html>"""
 
 
-def render_log(issue: int) -> str:
-    text = tmux.output(issue, WORKSPACE / "logs", tail=LOG_TAIL)
+def render_log(cfg: Config, arg: str) -> str:
+    found = _split_target(cfg, arg)
+    if not found:
+        return render(cfg, "no such log", ok=False)
+    key, _slug, issue = found
+    text = tmux.output(issue, Workspace(WORKSPACE, _slug).logs, tail=LOG_TAIL)
     return f"""<!doctype html><html lang=en><head>
 <meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -568,10 +613,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(json.dumps({"pane": terminal.capture(w)}),
                               ctype="application/json")
         if path.startswith("/log/"):
-            try:
-                return self._send(render_log(int(path.rsplit("/", 1)[-1])))
-            except ValueError:
-                return self._send(render(self.cfg, "no such log", ok=False), 404)
+            return self._send(render_log(self.cfg, path[len("/log/"):]))
 
         q = parse_qs(urlparse(self.path).query)
         # parse_qs has ALREADY percent-decoded the value. Decoding again turns a
@@ -624,15 +666,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _parameterised(self, name: str, arg: str) -> tuple[str, bool]:
-        try:
-            n = int(arg)
-        except ValueError:
-            return f"{name}: not an issue number", False
         if not self.cfg.repos:
             return "no repository configured", False
-        repo = self.cfg.repos[0].slug
+        found = _split_target(self.cfg, arg)
+        if not found:
+            return f"{name}: not an issue I can place in a repository", False
+        key, repo, n = found
+        # `repo` used to be cfg.repos[0].slug unconditionally, so with a second
+        # repository configured a requeue would have relabelled whichever issue
+        # happened to share that number in the FIRST repo.
         if name == "kill":
-            tmux.kill(n)
+            tmux.kill(key, n)
             return f"stopped the agent on #{n}", True
         # requeue: hand a stalled issue back to the loop
         try:

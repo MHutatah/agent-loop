@@ -9,6 +9,7 @@ forever in-process: a crash then costs one tick instead of the whole service, an
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 
@@ -491,6 +492,17 @@ def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
                                    problems="\n".join(f"- {p}" for p in problems))
         res = invoke(IMPLEMENTER, prompt, cwd=str(path),
                      timeout=cfg.agent_timeout_s, dry=cfg.dry_run)
+        # LEAVE A LOG. The fixer runs synchronously through invoke() rather than
+        # tmux.spawn, so unlike an implementer run it wrote nothing anywhere.
+        # #91 failed three times and escalated with no diagnostics at all, and
+        # the actual cause, a missing git identity, had to be found by hand.
+        if not cfg.dry_run:
+            with contextlib.suppress(OSError):
+                ws.logs.mkdir(parents=True, exist_ok=True)
+                (ws.logs / f"issue-{num}.fix.log").write_text(
+                    "\n".join([f"ok={res.ok} limited={res.limited}",
+                               f"error={res.error}", "", res.text or ""]),
+                    encoding="utf-8")
         if not res.ok:
             out.append(f"PR #{num} fixer {'limited' if res.limited else 'failed'}")
             return

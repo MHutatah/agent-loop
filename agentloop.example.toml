@@ -7,20 +7,34 @@
 # Copy to agentloop.toml and edit. With no config the loop does nothing, which is
 # the correct behaviour for an unconfigured autonomous agent.
 
+# MULTIPLE REPOSITORIES ARE SAFE AS OF THE per-repo ISOLATION FIX. They were not
+# before: the clone lived at <workspace>/repo for every repo, so the second one
+# fetched the first one's origin and opened pull requests containing the wrong
+# project's code. Everything per-repo is now namespaced under
+# <workspace>/repos/<owner>__<name>/, and `doctor` fails if a clone's origin does
+# not match its slug. Concurrency is capped globally AND per repo, and the
+# scheduler gives each repository one slot per pass rather than letting the first
+# entry drain the pool.
+
 [[repo]]
-slug           = "you/your-repo"
+slug           = "MHutatah/arab-football-unified-api"
 default_branch = "main"
 
 # Opt-in, and deliberately off by default: this lets an agent merge to your
 # default branch with no human in the loop. Turn it on only once you have
 # watched the loop work and trust the gate — CI green AND the judge passing AND
 # no guarded path touched AND no human comment.
-auto_merge     = false
+auto_merge     = true
 
 # Run before opening a PR. The agent is told to make this pass.
 test_cmd       = "python -m pytest -q"
 
-# Add more repos by repeating the block.
+# A second project. Note auto_merge = false: the gate's judge reads the diff and
+# the code around it, which catches an unmet criterion but not a wrong
+# specification, so a repository serving real users should collect PRs for you
+# to merge rather than merging itself.
 # [[repo]]
-# slug       = "you/another-repo"
-# auto_merge = false
+# slug           = "MHutatah/ipa-community"
+# default_branch = "main"
+# auto_merge     = false
+# test_cmd       = "npm test"

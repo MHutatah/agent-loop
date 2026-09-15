@@ -30,6 +30,14 @@ FAIL if any of these are true:
 - the diff contains changes unrelated to the issue
 - it weakens a guardrail, a licence, CI, or anything security-relevant
 - it deletes or disables tests to make them pass
+- a test was added that does not actually assert the behaviour it names
+
+You are in a checkout of the repository at this commit. READ THE SURROUNDING
+CODE before ruling: open the files the diff touches, follow the functions it
+calls, and check that a new test asserts something that would fail if the
+change were reverted. A criterion is not met because a plausible-looking line
+appeared, and "no test covers it" is a claim you can verify rather than
+guess.
 
 === ISSUE #{number}: {title} ===
 {body}
@@ -67,12 +75,17 @@ class Verdict:
         return "\n".join(lines)
 
 
-def judge_pr(issue: dict, diff: str, *, timeout: int = 600, dry: bool = False) -> Verdict:
+def judge_pr(issue: dict, diff: str, *, cwd: str | None = None,
+             timeout: int = 600, dry: bool = False) -> Verdict:
+    """Review one PR. `cwd` is the worktree, and passing it is what lets the
+    judge open the files around the diff instead of guessing from context
+    lines. Without it the review is still attempted, so a missing worktree
+    degrades the verdict rather than dropping it."""
     prompt = PROMPT.format(number=issue.get("number", "?"),
                            title=issue.get("title", ""),
                            body=(issue.get("body") or "")[:8000],
                            diff=diff or "(empty diff)")
-    res: AgentResult = invoke(JUDGE, prompt, timeout=timeout, dry=dry)
+    res: AgentResult = invoke(JUDGE, prompt, cwd=cwd, timeout=timeout, dry=dry)
     if not res.ok:
         return Verdict(False, error=res.error, limited=res.limited)
 

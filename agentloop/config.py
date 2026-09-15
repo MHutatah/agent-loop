@@ -42,7 +42,22 @@ IMPLEMENTER = ["codex", "exec", "--sandbox", "workspace-write"]
 # between a handful of PRs a day and many. Override with AGENTLOOP_JUDGE_MODEL
 # (e.g. "opus") when a repo needs a harsher reviewer.
 JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "sonnet")
-JUDGE = ["claude", "-p", "--output-format", "json", "--model", JUDGE_MODEL]
+# READ-ONLY TOOLS, and a working directory, because a diff is not enough.
+#
+# The judge's own docstring promised to decide whether "an acceptance criterion
+# is unmet, or met only superficially", and it was handed the diff as text with
+# no repository and no tools. It cannot see the function a changed line calls,
+# whether a new test asserts anything, or whether the thing it is asked to
+# verify already existed. Anthropic's own reviewer for this job, the
+# `code-review` plugin shipped for claude-code-action, reads the repository;
+# a diff-only reviewer is the cheap version of a different, weaker task.
+#
+# Read, Grep and Glob only. The judge must not edit the branch it is judging,
+# and it must not run the tests: CI already does that, and gate.py refuses to
+# merge without it, so a judge that could run them would only be able to
+# disagree with the authority.
+JUDGE = ["claude", "-p", "--output-format", "json", "--model", JUDGE_MODEL,
+         "--allowedTools", "Read,Grep,Glob"]
 
 
 @dataclass
@@ -61,6 +76,11 @@ class Config:
 
     # Concurrency: two is a sane default for a small VPS that runs other things.
     max_concurrent_agents: int = 2
+
+    # And a per-repository ceiling. Capacity used to be global only, and the
+    # scheduler walked `cfg.repos` in order handing every free slot to whoever
+    # was listed first, so a second project did not run slowly, it never ran.
+    max_concurrent_per_repo: int = 1
 
     # An agent gets this many attempts at one issue (initial + fixes) before the
     # loop stops and hands it to a human. Without this a confused agent can burn
@@ -102,6 +122,7 @@ class Config:
             repos=_load_repos(),
             max_judge_calls=s.max_judge_calls,
             max_concurrent_agents=s.max_concurrent_agents,
+            max_concurrent_per_repo=s.max_concurrent_per_repo,
             max_attempts_per_issue=s.max_attempts_per_issue,
             dry_run=os.environ.get("AGENTLOOP_DRY_RUN", "") == "1",
         )

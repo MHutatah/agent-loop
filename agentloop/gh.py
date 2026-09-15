@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import subprocess
 
 from agentloop.config import MARKER
@@ -115,6 +116,21 @@ def pr_for_branch(repo: str, branch: str) -> dict | None:
     rows = _json(["pr", "list", "--repo", repo, "--head", branch, "--state", "open",
                   "--limit", "1", "--json", "number,url,labels"])
     return rows[0] if rows else None
+
+
+def issues_with_open_pr(repo: str, label: str) -> set[int]:
+    """Issue numbers that an open agent PR already closes.
+
+    Read out of the PR bodies, which the loop writes as "Closes #N". That is a
+    durable fact about the work, unlike the labels, which the issue-list index
+    reports stale for a few seconds after a write: long enough for the tick
+    that opened a PR to start a second agent on the same issue.
+    """
+    out: set[int] = set()
+    for pr in open_prs(repo, label):
+        for m in re.finditer(r"(?i)\bcloses\s+#(\d+)", pr.get("body") or ""):
+            out.add(int(m.group(1)))
+    return out
 
 
 def pr_diff(repo: str, number: int, max_chars: int = 120_000) -> str:

@@ -318,3 +318,27 @@ def test_ordinary_work_is_not_blocked(tmp_path):
     (tree / "src.py").write_text("real change\n", encoding="utf-8")
     ws.commit_all(tree, "ordinary")
     assert touches_guarded_path(ws.changed_paths(tree, "main"), Config()) == []
+
+
+def test_an_issue_with_an_open_pr_is_not_restarted():
+    """GitHub's issue-list index is eventually consistent, so the labels cannot
+    be trusted within one tick. The collector removes agent:ready and
+    agent:working, and a `gh issue list --label` a second later still returns
+    the issue as ready and not working. That is not a hypothesis: the tick that
+    opened PRs for #2 and #89 immediately started a second agent on #89, with
+    the label fix already deployed.
+
+    The PR is the durable fact, so the filter reads it out of the PR body.
+    """
+    from agentloop.config import LABEL_PR
+
+    prs = [{"number": 91, "body": "Closes #89\n\nImplemented autonomously."},
+           {"number": 90, "body": "closes #2 and refs #3"}]
+    with patch("agentloop.gh.open_prs", return_value=prs):
+        claimed = gh.issues_with_open_pr("o/r", LABEL_PR)
+    assert claimed == {89, 2}, claimed
+
+
+def test_no_open_prs_claims_nothing():
+    with patch("agentloop.gh.open_prs", return_value=[]):
+        assert gh.issues_with_open_pr("o/r", "agent:pr") == set()

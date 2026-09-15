@@ -101,6 +101,32 @@ class Workspace:
         git(["worktree", "add", "-B", branch, str(path), f"origin/{base}"], self.clone)
         return path, branch
 
+    def attach(self, issue_number: int, branch: str) -> Path:
+        """A worktree on an EXISTING pull request branch, taken from origin.
+
+        Never `create()`, which passes `-B <branch> origin/<base>` and so RESETS
+        the branch to the base, discarding every commit on it. The fixer used
+        create() whenever the local worktree was missing, then force-pushed the
+        result, which silently destroyed finished work and closed the pull
+        request: ipa-community #91 went from a reviewed, criteria-complete
+        branch to a pointer at main in one tick, and the reflog read
+
+            branch: Reset to origin/main
+            commit: [STORY] Make short Arabic terms findable in the glossary
+            branch: Created from origin/main
+
+        A missing worktree is ordinary. It happens after a reboot, a prune, or
+        any manual cleanup, so this path has to be the safe one.
+        """
+        path = self.trees / f"issue-{issue_number}"
+        if path.exists():
+            return path
+        git(["fetch", "origin", branch], self.clone)
+        git(["worktree", "add", "--force", "--detach", str(path),
+             f"origin/{branch}"], self.clone)
+        git(["switch", "-C", branch, "--track", f"origin/{branch}"], path)
+        return path
+
     def remove(self, issue_number: int, *, dry: bool = False) -> None:
         path = self.trees / f"issue-{issue_number}"
         if dry or not path.exists():
@@ -155,7 +181,19 @@ class Workspace:
              "-c", "user.email=agent-loop@users.noreply.github.com",
              "commit", "-m", message], path)
 
-    def push(self, path: Path, branch: str) -> None:
+    def push(self, path: Path, branch: str, *, base: str = "") -> None:
+        """Push, refusing to push away work.
+
+        `base` turns on the guard: a branch with nothing ahead of the base has
+        no work on it, and force-pushing that over a pull request is how #91 was
+        destroyed. --force-with-lease does not help, because the lease was
+        honest: we really had fetched, and then reset our own branch.
+        """
+        if base and self.ahead_of(path, base) == 0:
+            raise RuntimeError(
+                f"refusing to push {branch}: it is not ahead of origin/{base}, "
+                "so there is nothing to push and force-pushing would discard "
+                "whatever the pull request already had")
         git(["push", "-u", "origin", branch, "--force-with-lease"], path)
 
     def active(self) -> list[int]:

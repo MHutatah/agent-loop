@@ -480,9 +480,8 @@ def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
         path = ws.trees / f"issue-{num}"
         if not cfg.dry_run and not path.exists():
             ws.ensure_clone()
-            path, _ = ws.create(num, pr["title"], repo.default_branch)
-            from agentloop.worktree import git
-            git(["checkout", pr["headRefName"]], path)
+            # attach(), never create(): create() resets the branch to the base.
+            path = ws.attach(num, pr["headRefName"])
         # Make origin/<base> present in the worktree so the agent can rebase.
         if not cfg.dry_run:
             from agentloop.worktree import git
@@ -497,7 +496,7 @@ def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
             return
         if not cfg.dry_run and ws.has_changes(path):
             ws.commit_all(path, f"Address review on #{num}")
-            ws.push(path, pr["headRefName"])
+            ws.push(path, pr["headRefName"], base=repo.default_branch)
         gh.comment(repo.slug, num,
                    "Addressed the points above. <!-- agent-loop:attempt --> " + MARKER,
                    dry=cfg.dry_run)

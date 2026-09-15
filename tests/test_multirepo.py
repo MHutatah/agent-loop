@@ -69,6 +69,36 @@ def test_window_names_are_unique_per_repo_for_the_same_issue_number():
     assert ":" not in a and "." not in a
 
 
+def test_spawn_runs_end_to_end_with_the_keyed_signature(tmp_path):
+    """THIS ONE ESCAPED TO PRODUCTION. Re-keying the tmux helpers on (repo,
+    issue) missed `spawn`'s own internal `kill(issue)` call, because a grep for
+    `window_name(issue)` finds the naming and not the calls. `spawn` had no test
+    at all, so the first evidence was a TypeError on the first real tick against
+    a live repository:
+
+        TypeError: kill() missing 1 required positional argument: 'issue'
+
+    Patching only `_tmux` exercises every line of `spawn` for real, which is the
+    cheapest thing that would have caught it.
+    """
+    calls = []
+
+    def fake_tmux(args, **kw):
+        calls.append(args)
+        return (0, "")
+
+    with patch("agentloop.tmux._tmux", side_effect=fake_tmux):
+        rc = tmux.spawn("o__r", 12, ["echo", "hi"], "a prompt",
+                        cwd=tmp_path, log_dir=tmp_path)
+
+    assert rc == tmp_path / "issue-12.rc"
+    assert (tmp_path / "issue-12.prompt").read_text(encoding="utf-8") == "a prompt"
+    # the window it opened carries the repo key, not a bare issue number
+    new_window = [a for a in calls if a and a[0] == "new-window"]
+    assert new_window and "o__r--12" in new_window[0]
+    assert "issue-12" not in new_window[0]
+
+
 def test_live_windows_reports_repo_and_issue_so_capacity_cannot_leak():
     """As a bare list of issue numbers, two repos each running their own #12
     counted as one live agent, so the concurrency cap leaked a slot per

@@ -193,7 +193,7 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
         return out
     logs = ws.logs
 
-    for n in _pending_issues(logs):
+    for n in _pending_issues(logs, ws.key):
         if tmux.is_running(ws.key, n):
             continue
         rc = tmux.exit_code(n, logs)
@@ -306,8 +306,13 @@ def _release(repo: Repo, ws: Workspace, n: int, reason: str | None = None,
         ws.remove(n)
 
 
-def _pending_issues(logs: Path) -> list[int]:
-    """Issues that have an agent run recorded but not yet collected."""
+def _pending_issues(logs: Path, key: str = "") -> list[int]:
+    """Issues that have an agent run recorded but not yet collected.
+
+    `key` scopes the live-window half to ONE repository. Without it this unioned
+    issue numbers with the (repo, issue) pairs live_windows now returns, and
+    sorted() raised on comparing an int to a tuple.
+    """
     if not logs.exists():
         return []
     nums = set()
@@ -316,7 +321,7 @@ def _pending_issues(logs: Path) -> list[int]:
             nums.add(int(f.stem.split("-", 1)[1]))
         except (ValueError, IndexError):
             continue
-    return sorted(nums | set(tmux.live_windows()))
+    return sorted(nums | set(tmux.live_for(key) if key else []))
 
 
 # ── pr watcher ───────────────────────────────────────────────────────────────

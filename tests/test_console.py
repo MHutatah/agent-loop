@@ -9,6 +9,8 @@ import json
 import pytest
 
 from agentloop import console, tmux
+from agentloop.config import Config, Repo
+from agentloop.worktree import Workspace
 
 
 # ── the tail must not read the whole file ────────────────────────────────────
@@ -44,12 +46,31 @@ def test_discard_log_is_safe_when_nothing_exists(tmp_path):
 
 
 # ── cards are capped ─────────────────────────────────────────────────────────
+def _cfg(tmp_path, *slugs):
+    """A Config whose repos resolve their logs under tmp_path.
+
+    The card renderer takes a Config rather than one logs directory now, because
+    logs moved under repos/<owner>__<name>/logs when repositories were isolated
+    from each other.
+    """
+    console.WORKSPACE = tmp_path
+    return Config(repos=[Repo(slug=s) for s in slugs])
+
+
+def _logs_for(tmp_path, slug):
+    logs = Workspace(tmp_path, slug).logs
+    logs.mkdir(parents=True, exist_ok=True)
+    return logs
+
+
 def test_agent_cards_are_capped_and_say_so(tmp_path, monkeypatch):
     monkeypatch.setattr(tmux, "live_windows", lambda: [])
     monkeypatch.setattr(console.tmux, "live_windows", lambda: [])
+    cfg = _cfg(tmp_path, "o/r")
+    logs = _logs_for(tmp_path, "o/r")
     for n in range(1, 21):
-        (tmp_path / f"issue-{n}.log").write_text("line\n", encoding="utf-8")
-    html_out = console._agent_cards(tmp_path, object())
+        (logs / f"issue-{n}.log").write_text("line\n", encoding="utf-8")
+    html_out = console._agent_cards(cfg, object())
     assert html_out.count('class="card"') == console.MAX_CARDS
     assert "older run" in html_out            # the rest are acknowledged, not hidden
     assert "issue #20" in html_out            # newest first
@@ -58,7 +79,36 @@ def test_agent_cards_are_capped_and_say_so(tmp_path, monkeypatch):
 
 def test_agent_cards_empty_state(tmp_path, monkeypatch):
     monkeypatch.setattr(console.tmux, "live_windows", lambda: [])
-    assert "No agents have run yet" in console._agent_cards(tmp_path, object())
+    assert "No agents have run yet" in console._agent_cards(_cfg(tmp_path, "o/r"),
+                                                            object())
+
+
+def test_cards_from_two_repos_do_not_collide_on_one_issue_number(tmp_path, monkeypatch):
+    """One card per (repo, issue). Keyed on the issue number alone, repo A's #12
+    and repo B's #12 were one card reading one log, and its Stop button killed
+    whichever tmux window came first."""
+    monkeypatch.setattr(console.tmux, "live_windows", lambda: [])
+    cfg = _cfg(tmp_path, "o/alpha", "o/beta")
+    for slug, text in (("o/alpha", "from alpha\n"), ("o/beta", "from beta\n")):
+        (_logs_for(tmp_path, slug) / "issue-12.log").write_text(text, encoding="utf-8")
+    out = console._agent_cards(cfg, object())
+    assert out.count('class="card"') == 2
+    assert "from alpha" in out and "from beta" in out
+    # every action names its own repository
+    assert "/log/o__alpha/12" in out
+    assert "/log/o__beta/12" in out
+
+
+def test_a_target_is_resolved_to_one_repository(tmp_path):
+    two = _cfg(tmp_path, "o/alpha", "o/beta")
+    assert console._split_target(two, "o__beta/12") == ("o__beta", "o/beta", 12)
+    # ambiguous with two repos configured, so refused rather than guessed
+    assert console._split_target(two, "12") is None
+    # a bare number still works for a single-repo setup, which is what the
+    # console's own links looked like before repositories were isolated
+    assert console._split_target(_cfg(tmp_path, "o/alpha"), "12") \
+        == ("o__alpha", "o/alpha", 12)
+    assert console._split_target(two, "o__alpha/nope") is None
 
 
 # ── flash: failure must not look like success ────────────────────────────────

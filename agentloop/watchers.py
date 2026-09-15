@@ -115,6 +115,23 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
 
     issues = gh.ready_issues(repo.slug, LABEL_READY, LABEL_WIP, LABEL_STOP,
                              LABEL_NEEDS_HUMAN)
+
+    # AN ISSUE THAT ALREADY HAS AN OPEN PR IS NOT WAITING TO BE STARTED, and the
+    # labels cannot be trusted to say so within one tick. GitHub's issue-list
+    # index is eventually consistent: the collector above removes agent:ready
+    # and agent:working, and a `gh issue list --label` a second later still
+    # returns the issue as ready and not working. That happened on the tick that
+    # opened PRs for #2 and #89 and immediately started a second agent on #89.
+    #
+    # The PR is the durable fact, so it is the one to filter on. This also
+    # covers a stale ready label left by hand and a restart mid-collection.
+    claimed = gh.issues_with_open_pr(repo.slug, LABEL_PR)
+    if claimed:
+        blocked = [i for i in issues if i["number"] in claimed]
+        issues = [i for i in issues if i["number"] not in claimed]
+        for i in blocked:
+            out.append(f"#{i['number']} already has an open PR, not restarting")
+
     if not issues:
         out.append("no ready issues")
         return out

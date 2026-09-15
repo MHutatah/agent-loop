@@ -113,7 +113,8 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
     out += _collect_finished(cfg, repo, ws)
     out += _reap(cfg, repo, ws)
 
-    issues = gh.ready_issues(repo.slug, LABEL_READY, LABEL_WIP, LABEL_STOP)
+    issues = gh.ready_issues(repo.slug, LABEL_READY, LABEL_WIP, LABEL_STOP,
+                             LABEL_NEEDS_HUMAN)
     if not issues:
         out.append("no ready issues")
         return out
@@ -277,7 +278,14 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
                                    f"<!-- agent-loop:attempt --> {MARKER}"),
                              base=repo.default_branch, cwd=str(path), label=LABEL_PR)
                 out.append(f"#{n} PR opened on {branch}")
+            # BOTH labels, and the ready one is the important half. Only WIP
+            # was removed here, so the same tick that opened the PR re-selected
+            # the issue and started another agent on it, and kept doing that
+            # until the issue closed. auto_merge=true hid it: the merge closed
+            # the issue before the next tick. With auto_merge off, one issue
+            # re-implemented itself indefinitely.
             gh.remove_label(repo.slug, n, LABEL_WIP)
+            gh.remove_label(repo.slug, n, LABEL_READY)
             tmux.kill(ws.key, n)
             (logs / f"issue-{n}.rc").unlink(missing_ok=True)
         except Exception as exc:                     # noqa: BLE001
@@ -298,6 +306,10 @@ def _release(repo: Repo, ws: Workspace, n: int, reason: str | None = None,
     """
     gh.remove_label(repo.slug, n, LABEL_WIP)
     if reason:
+        # Escalating takes it out of the queue too. Leaving ready on meant the
+        # next tick picked it straight back up, so the label said "a human
+        # should look at this" while a machine kept trying.
+        gh.remove_label(repo.slug, n, LABEL_READY)
         gh.add_label(repo.slug, n, LABEL_NEEDS_HUMAN)
         gh.comment(repo.slug, n, reason)
     tmux.kill(ws.key, n)

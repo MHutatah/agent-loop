@@ -39,8 +39,17 @@ def _json(args: list[str], cwd: str | None = None):
 
 # ── issues ───────────────────────────────────────────────────────────────────
 def ready_issues(repo: str, ready_label: str, wip_label: str,
-                 stop_label: str) -> list[dict]:
-    """Open issues labelled ready, not already being worked, not stopped."""
+                 stop_label: str, needs_human_label: str = "") -> list[dict]:
+    """Open issues labelled ready, not being worked, not stopped, not escalated.
+
+    THE ESCALATION EXCLUSION IS LOAD-BEARING. Nothing removes the ready label,
+    so an issue handed back to a human kept it and was re-selected on the very
+    next tick: a new agent on the issue somebody was just asked to look at, and
+    `agent:needs-human` was decoration. The attempt cap in watchers._attempts
+    counts comments on a PULL REQUEST, so it never applied to an issue that
+    failed before producing one, and a confused agent could loop on the same
+    issue until the quota ran out.
+    """
     issues = _json([
         "issue", "list", "--repo", repo, "--state", "open",
         "--label", ready_label, "--limit", "50",
@@ -50,6 +59,8 @@ def ready_issues(repo: str, ready_label: str, wip_label: str,
     for i in issues:
         names = {lbl["name"] for lbl in i.get("labels", [])}
         if wip_label in names or stop_label in names:
+            continue
+        if needs_human_label and needs_human_label in names:
             continue
         out.append(i)
     return out

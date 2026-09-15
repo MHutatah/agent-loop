@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-from agentloop import tmux
+from agentloop import gh, tmux
 from agentloop.config import Config, touches_guarded_path
 from agentloop.worktree import Workspace, repo_key
 
@@ -238,6 +238,76 @@ def test_the_reaper_leaves_finished_and_in_flight_work_alone(tmp_path):
 
     assert out == []                    # 8 is running, 9 is collectable
     unlabel.assert_not_called()
+
+
+# ── finished work must leave the queue ──────────────────────────────────────
+def _issue(number, *labels):
+    return {"number": number, "title": "t", "body": "",
+            "labels": [{"name": nm} for nm in labels]}
+
+
+def test_an_escalated_issue_is_not_picked_straight_back_up():
+    """OBSERVED LIVE. Nothing removes `agent:ready`, and `ready_issues` excluded
+    only `agent:working` and `agent:stop`, so an issue handed back to a human
+    kept its ready label and was re-selected on the very next tick: a fresh
+    agent on the issue somebody had just been asked to look at.
+
+    The attempt cap does not help. `watchers._attempts` counts comments on a
+    PULL REQUEST, so an issue that fails before producing one has no cap at all
+    and could loop until the quota ran out.
+    """
+    from agentloop.config import LABEL_NEEDS_HUMAN, LABEL_READY, LABEL_STOP, LABEL_WIP
+
+    rows = [_issue(1, LABEL_READY),
+            _issue(2, LABEL_READY, LABEL_WIP),
+            _issue(3, LABEL_READY, LABEL_STOP),
+            _issue(4, LABEL_READY, LABEL_NEEDS_HUMAN)]
+    with patch("agentloop.gh._json", return_value=rows):
+        picked = [i["number"] for i in gh.ready_issues(
+            "o/r", LABEL_READY, LABEL_WIP, LABEL_STOP, LABEL_NEEDS_HUMAN)]
+    assert picked == [1], picked
+
+
+def test_opening_a_pull_request_takes_the_issue_out_of_the_queue(tmp_path):
+    """THE ONE THAT ACTUALLY HAPPENED. The tick that opened PR #88 started a
+    second agent on the same issue in the same pass, because collection removed
+    `agent:working` and left `agent:ready` on. It would have kept doing that
+    until the issue closed.
+
+    `auto_merge = true` hid it: the merge closed the issue before the next tick.
+    With auto_merge off, one issue re-implements itself indefinitely.
+    """
+    from agentloop.config import LABEL_READY, LABEL_WIP, Repo
+    from agentloop.watchers import _collect_finished
+
+    ws = Workspace(tmp_path, "o/r")
+    ws.logs.mkdir(parents=True)
+    (ws.logs / "issue-3.rc").write_text("0", encoding="utf-8")
+    tree = ws.trees / "issue-3"
+    tree.mkdir(parents=True)
+    cfg, repo = Config(), Repo(slug="o/r", default_branch="main")
+
+    with patch("agentloop.tmux.available", return_value=True), \
+         patch("agentloop.tmux.is_running", return_value=False), \
+         patch("agentloop.tmux.exit_code", return_value=0), \
+         patch("agentloop.tmux.output", return_value=""), \
+         patch("agentloop.tmux.kill"), \
+         patch.object(Workspace, "ahead_of", return_value=1), \
+         patch.object(Workspace, "has_changes", return_value=False), \
+         patch.object(Workspace, "changed_paths", return_value=["lib/arabic.ts"]), \
+         patch.object(Workspace, "push"), \
+         patch("agentloop.gh.run", return_value="a title"), \
+         patch("agentloop.gh.pr_for_branch", return_value=None), \
+         patch("agentloop.gh.create_pr") as create, \
+         patch("agentloop.gh.remove_label") as unlabel:
+        out = _collect_finished(cfg, repo, ws)
+
+    assert any("PR opened" in line for line in out), out
+    create.assert_called_once()
+    dropped = {c.args[2] for c in unlabel.call_args_list}
+    assert dropped == {LABEL_WIP, LABEL_READY}, (
+        f"collection dropped {dropped}; leaving {LABEL_READY} on is what made "
+        "the next tick start another agent on an issue that already has a PR")
 
 
 def test_ordinary_work_is_not_blocked(tmp_path):

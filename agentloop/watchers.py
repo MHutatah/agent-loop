@@ -16,7 +16,6 @@ from agentloop import gh, tmux
 from agentloop.budget import Budget
 from agentloop.config import (
     IMPLEMENTER,
-    touches_guarded_path,
     LABEL_NEEDS_HUMAN,
     LABEL_PR,
     LABEL_READY,
@@ -25,6 +24,7 @@ from agentloop.config import (
     MARKER,
     Config,
     Repo,
+    touches_guarded_path,
 )
 from agentloop.gate import decide
 from agentloop.judge import Verdict, judge_pr
@@ -266,7 +266,7 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
             if existing:
                 # A previous tick pushed and then failed to finish. Adopt its PR
                 # instead of failing forever on "a pull request already exists".
-                if LABEL_PR not in {l["name"] for l in existing.get("labels", [])}:
+                if LABEL_PR not in {lbl["name"] for lbl in existing.get("labels", [])}:
                     gh.add_label(repo.slug, existing["number"], LABEL_PR)
                 out.append(f"#{n} PR #{existing['number']} already open — adopted")
             else:

@@ -139,7 +139,7 @@ class Workspace:
         committed = git(["diff", "--name-only", f"origin/{base}...HEAD"],
                         path, check=False)
         pending = git(["status", "--porcelain"], path, check=False)
-        names = [l.strip() for l in committed.splitlines() if l.strip()]
+        names = [ln.strip() for ln in committed.splitlines() if ln.strip()]
         for line in pending.splitlines():
             # porcelain v1: XY<space>path, with "orig -> new" for renames
             name = line[3:].strip() if len(line) > 3 else ""

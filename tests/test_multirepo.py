@@ -87,8 +87,9 @@ def test_live_windows_reports_repo_and_issue_so_capacity_cannot_leak():
 
 # ── committed work must not read as "the agent did nothing" ─────────────────
 def _repo(path: Path) -> None:
-    run = lambda *a: subprocess.run(["git", *a], cwd=path, check=True,
-                                    capture_output=True)
+    def run(*a):
+        subprocess.run(["git", *a], cwd=path, check=True, capture_output=True)
+
     path.mkdir(parents=True, exist_ok=True)
     run("init", "-q", "-b", "main")
     run("config", "user.email", "t@example.com")

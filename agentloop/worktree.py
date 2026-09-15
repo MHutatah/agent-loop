@@ -88,6 +88,17 @@ class Workspace:
                     "Refusing to reuse it. Delete that directory and let the loop "
                     "re-clone.")
             git(["fetch", "--prune", "origin"], self.clone)
+        # An identity ON THE CLONE, inherited by every worktree.
+        #
+        # commit_all passes -c user.name and -c user.email inline, so committing
+        # always worked and nothing looked wrong. `git rebase` takes no such
+        # flags: it read the box's config, found none, and died with
+        # "unable to auto-detect email address". The fixer therefore failed
+        # every single rebase attempt, burned all three tries on ipa-community
+        # #91 and escalated it as if the conflict were hard.
+        git(["config", "user.name", "agent-loop"], self.clone, check=False)
+        git(["config", "user.email", "agent-loop@users.noreply.github.com"],
+            self.clone, check=False)
 
     def create(self, issue_number: int, title: str, base: str = "main",
                *, dry: bool = False) -> tuple[Path, str]:
@@ -120,7 +131,16 @@ class Workspace:
         """
         path = self.trees / f"issue-{issue_number}"
         if path.exists():
-            return path
+            on = git(["rev-parse", "--abbrev-ref", "HEAD"], path, check=False)
+            if on == branch:
+                return path
+            # A LEFTOVER WORKTREE ON THE WRONG BRANCH IS WORSE THAN NONE. The
+            # destructive create() path left #91's worktree checked out on
+            # agent/91-… while the pull request's head was agent/89-…, so the
+            # fixer committed onto a branch nobody was going to push.
+            log.warning("worktree for #%s is on %r, not %r; rebuilding",
+                        issue_number, on, branch)
+            self.remove(issue_number)
         git(["fetch", "origin", branch], self.clone)
         git(["worktree", "add", "--force", "--detach", str(path),
              f"origin/{branch}"], self.clone)

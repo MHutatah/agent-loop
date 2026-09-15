@@ -376,3 +376,43 @@ def test_a_conflicting_pr_is_handed_to_the_fixer_not_held_forever(tmp_path):
     # and it must not spend a judge call on a branch that cannot merge
     judge.assert_not_called()
     assert any("fixing" in line for line in out), out
+
+
+def test_the_push_guard_refuses_to_discard_a_pull_request(tmp_path):
+    """THE WORST BUG OF THE DAY, and it destroyed real work.
+
+    _run_fixer recreated a missing worktree with create(), which passes
+    `-B <branch> origin/<base>` and so RESETS the branch to the base. It then
+    force-pushed the result. ipa-community #91 went from a reviewed,
+    criteria-complete branch to a pointer at main in one tick, and GitHub closed
+    the pull request because its head no longer had any commits. The reflog:
+
+        branch: Reset to origin/main
+        commit: [STORY] Make short Arabic terms findable in the glossary
+        branch: Created from origin/main
+
+    --force-with-lease did not help: the lease was honest, we really had
+    fetched, and then reset our own branch. So the guard is about content, not
+    staleness: a branch with nothing ahead of the base has no work on it and
+    must never be force-pushed over a pull request.
+    """
+    tree = tmp_path / "t-push"
+    _repo(tree)
+    ws = Workspace(tmp_path / "ws-push", "o/r")
+
+    # nothing ahead of base: this is the state that destroyed #91
+    assert ws.ahead_of(tree, "main") == 0
+    try:
+        ws.push(tree, "agent/89-x", base="main")
+    except RuntimeError as exc:
+        assert "nothing to push" in str(exc), exc
+    else:
+        raise AssertionError("pushed a branch that would have discarded the PR")
+
+    # with real work on it the guard gets out of the way
+    (tree / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    ws.commit_all(tree, "real work")
+    assert ws.ahead_of(tree, "main") == 1
+    with patch("agentloop.worktree.git") as g:
+        ws.push(tree, "agent/89-x", base="main")
+    assert g.called

@@ -265,8 +265,8 @@ def pr_judged_verdict(comments: list[dict], sha: str) -> bool | None:
         return None
     for c in comments:
         body = c.get("body") or ""
-        if f"agent-loop:judged:{sha}:pass" in body:
+        if f"agent-loop:judged2:{sha}:pass" in body:
             return True
-        if f"agent-loop:judged:{sha}:fail" in body:
+        if f"agent-loop:judged2:{sha}:fail" in body:
             return False
     return None

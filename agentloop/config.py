@@ -35,13 +35,41 @@ MARKER = "<!-- agent-loop -->"
 # but nothing outside it. (`--full-auto` is the deprecated spelling.) Codex also
 # refuses to run outside a git repo unless told otherwise — our worktrees are
 # repos, so that check is a useful backstop and is left on.
-IMPLEMENTER = ["codex", "exec", "--sandbox", "workspace-write"]
+# THE IMPLEMENTER IS STILL CODEX, AND THAT IS A SANDBOX DECISION, NOT A MODEL ONE.
+#
+# `--sandbox workspace-write` confines it to the worktree it was started in. The
+# `claude` CLI has no equivalent flag: checked on 2.1.220, the options are
+# --permission-mode, --allowedTools/--disallowedTools and
+# --dangerously-skip-permissions, none of which is a filesystem boundary, and
+# the agent needs Bash to run the repo's test command, so a tool allowlist does
+# not confine it either. This box runs sanad, nolog, hermes, litellm, matrix,
+# ipacommunity and ipauat, which are services other people use, so swapping a
+# confined implementer for an unconfined one is a real regression that a newer
+# model does not pay for.
+#
+# Set AGENTLOOP_IMPLEMENTER to override, space-separated, e.g.
+#   AGENTLOOP_IMPLEMENTER="claude -p --model claude-opus-5 --dangerously-skip-permissions"
+# Two things change if you do. Claude Code can write .git, which is what the
+# codex sandbox blocks and therefore the reason a conflicting pull request
+# cannot currently be rebased (see the loop's own issue on that). And the whole
+# loop then draws on one subscription rather than two, so total throughput falls
+# even though each agent is stronger.
+IMPLEMENTER = (os.environ.get("AGENTLOOP_IMPLEMENTER", "").split()
+               or ["codex", "exec", "--sandbox", "workspace-write"])
 
-# Judging is "does this diff meet the stated acceptance criteria" — a task Sonnet
-# does well, and on a Pro plan the quota difference per review is the difference
-# between a handful of PRs a day and many. Override with AGENTLOOP_JUDGE_MODEL
-# (e.g. "opus") when a repo needs a harsher reviewer.
-JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "sonnet")
+# THE JUDGE RUNS ON OPUS 5, the current most capable Opus-tier model.
+#
+# It used to be Sonnet, chosen when the loop shared a Pro plan with interactive
+# work and the quota difference per review decided whether the day got a handful
+# of pull requests or many. On Max that constraint is gone, and the judge is the
+# one place in this system where being right matters more than being cheap: it
+# is a small number of high-leverage calls, and a verdict it gets wrong either
+# merges a defect or holds good work for a day.
+#
+# Exact model IDs only, never a date-suffixed variant. "opus"/"sonnet" bare
+# aliases resolve to whatever the CLI decides is current, which is precisely the
+# ambiguity worth removing from a file that gates merges.
+JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "claude-opus-5")
 # READ-ONLY TOOLS, and a working directory, because a diff is not enough.
 #
 # The judge's own docstring promised to decide whether "an acceptance criterion
@@ -94,7 +122,7 @@ class Config:
     # loop keeps a reserve: it stops judging well before the plan's limit rather
     # than leaving you unable to use Claude yourself. Codex is unaffected — it
     # implements on the separate ChatGPT subscription.
-    max_judge_calls: int = 12
+    max_judge_calls: int = 400
     judge_window_hours: float = 5.0
 
     # Paths an agent may never change and still auto-merge. Touching one forces

@@ -65,3 +65,26 @@ def test_status_is_readable_on_a_phone(budget):
     budget.record()
     s = budget.status()
     assert "1/3 judge calls" in s and "resets in" in s
+
+
+def test_zero_means_unlimited_not_never(tmp_path):
+    """0 READ AS A PLAIN CEILING MEANT "NEVER JUDGE", which would hold every
+    pull request forever with a reason that reads like a spend decision. On Max
+    the natural way to say "stop rationing reviews" is to set it to 0."""
+    b = Budget(tmp_path / "b.json", 0, 5.0)
+    assert b.unlimited is True
+    assert b.allow() is True
+    for _ in range(50):
+        b.record()
+    assert b.allow() is True
+    assert b.used() == 50
+    assert "no cap" in b.status()
+
+
+def test_a_real_ceiling_still_stops(tmp_path):
+    b = Budget(tmp_path / "c.json", 3, 5.0)
+    for _ in range(3):
+        assert b.allow() is True
+        b.record()
+    assert b.allow() is False
+    assert "3/3" in b.status()

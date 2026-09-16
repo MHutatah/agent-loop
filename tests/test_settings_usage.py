@@ -21,22 +21,29 @@ def st(tmp_path, monkeypatch):
 
 
 def test_defaults_are_conservative(st):
-    assert st.max_judge_calls == 12
+    # 400, not 12: the old ceiling was sized for a Pro plan shared with
+    # interactive work. On Max the budget exists to stop a crash loop, not to
+    # ration reviews, and a cap that small silently held pull requests.
+    assert st.max_judge_calls == 400
     assert st.max_concurrent_agents == 2
     assert st.max_attempts_per_issue == 3
 
 
 def test_adjust_persists(st, tmp_path):
     st.adjust("max_judge_calls", +3)
-    assert Settings.load().max_judge_calls == 15
+    assert Settings.load().max_judge_calls == 403
 
 
 @pytest.mark.parametrize("key", list(BOUNDS))
 def test_cannot_exceed_bounds(st, key):
     lo, hi = BOUNDS[key]
-    st.adjust(key, +999)
+    # A step large enough to saturate ANY bound. +999 used to be plenty; the
+    # judge-call ceiling is now 5000, and a step that no longer reaches the
+    # bound would have tested nothing while still passing.
+    step = 10 ** 7
+    st.adjust(key, +step)
     assert getattr(Settings.load(), key) == hi
-    st.adjust(key, -999)
+    st.adjust(key, -step)
     assert getattr(Settings.load(), key) == lo
 
 
@@ -50,13 +57,13 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path, monkeypatch):
     p = tmp_path / "settings.json"
     p.write_text("}{ not json", encoding="utf-8")
     monkeypatch.setattr(settings_mod, "PATH", p)
-    assert Settings.load().max_judge_calls == 12
+    assert Settings.load().max_judge_calls == 400
 
 
 def test_out_of_range_file_is_clamped_on_load(tmp_path, monkeypatch):
     """A hand-edited file must not bypass the bounds either."""
     p = tmp_path / "settings.json"
-    p.write_text(json.dumps({"max_judge_calls": 9999}), encoding="utf-8")
+    p.write_text(json.dumps({"max_judge_calls": 99999}), encoding="utf-8")
     monkeypatch.setattr(settings_mod, "PATH", p)
     assert Settings.load().max_judge_calls == BOUNDS["max_judge_calls"][1]
 

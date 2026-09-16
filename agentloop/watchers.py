@@ -440,6 +440,17 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
             if verdict.limited:
                 out.append(f"PR #{num} judge rate-limited — will retry")
                 return out
+            if not verdict.usable:
+                # A JUDGE THAT CANNOT RULE IS NOT A REJECTION. This used to fall
+                # through to `problems`, so a broken judge call became "the
+                # reviewer did not pass this PR", put an agent on it three
+                # times, and escalated it behind a review reading
+                # "CHANGES REQUESTED - score 0/10" with an empty body. Three
+                # green pull requests were failed that way by one bad flag
+                # order. Hold instead, post nothing, and say so.
+                out.append(f"PR #{num} judge could not rule ({verdict.error}) "
+                           "- holding, not failing")
+                return out
             if not cfg.dry_run:
                 budget.record()
             gh.pr_review(repo.slug, num,

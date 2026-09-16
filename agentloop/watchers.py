@@ -13,7 +13,7 @@ import contextlib
 import logging
 from pathlib import Path
 
-from agentloop import gh, tmux
+from agentloop import gh, second_voice, tmux
 from agentloop.budget import Budget
 from agentloop.config import (
     IMPLEMENTER,
@@ -23,6 +23,7 @@ from agentloop.config import (
     LABEL_STOP,
     LABEL_WIP,
     MARKER,
+    SECOND_VOICE_MODEL,
     Config,
     Repo,
     touches_guarded_path,
@@ -398,6 +399,7 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
         out.append(f"PR #{num} CI pending")
         return out
 
+    tree = ws.trees / f"issue-{num}"
     comments = gh.pr_review_comments(repo.slug, num)
     # "A human asked for changes" must mean "a comment we did not write". The loop
     # pushes under your own account, so authorship cannot tell us apart.
@@ -443,7 +445,6 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
             if not budget.allow():
                 out.append(f"PR #{num} judge budget spent ({budget.status()})")
                 return out
-            tree = ws.trees / f"issue-{num}"
             verdict = judge_pr(issue, gh.pr_diff(repo.slug, num),
                                cwd=str(tree) if tree.exists() else None,
                                dry=cfg.dry_run)
@@ -481,6 +482,27 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
         out.append(f"PR #{num} fixing: {problems[0][:60]}")
         _run_fixer(cfg, repo, ws, num, pr, issue, problems, out)
         return out
+
+    # A SECOND VOICE ON THE CHANGES WHERE BEING WRONG IS EXPENSIVE. Asked only
+    # after the judge has passed, because its question is different: not "does
+    # this match the criteria" but "were the criteria right". Two pull requests
+    # landed the same week that each passed their own criteria and contradicted
+    # each other in the same function; nothing in the pipeline held both specs
+    # at once. A dissent forces human review; an unavailable opinion changes
+    # nothing at all.
+    if verdict is not None and verdict.passed and second_voice.is_critical(
+            files, labels, cfg):
+        op = second_voice.consult(issue, gh.pr_diff(repo.slug, num),
+                                  cwd=str(tree) if tree.exists() else None,
+                                  dry=cfg.dry_run)
+        if op is not None:
+            gh.comment(repo.slug, num, op.as_comment(SECOND_VOICE_MODEL),
+                       dry=cfg.dry_run)
+            if op.concern:
+                gh.add_label(repo.slug, num, LABEL_NEEDS_HUMAN, dry=cfg.dry_run)
+                out.append(f"PR #{num} second voice raised a concern - held for a human")
+                return out
+            out.append(f"PR #{num} second voice: no objection")
 
     gate = decide(repo_auto_merge=repo.auto_merge, checks=checks, verdict=verdict,
                   changed_files=files, mergeable=pr.get("mergeable") or "",

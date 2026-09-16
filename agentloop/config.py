@@ -35,27 +35,44 @@ MARKER = "<!-- agent-loop -->"
 # but nothing outside it. (`--full-auto` is the deprecated spelling.) Codex also
 # refuses to run outside a git repo unless told otherwise — our worktrees are
 # repos, so that check is a useful backstop and is left on.
-# THE IMPLEMENTER IS STILL CODEX, AND THAT IS A SANDBOX DECISION, NOT A MODEL ONE.
+# THE IMPLEMENTER IS CLAUDE CODE, on Opus 5.
 #
-# `--sandbox workspace-write` confines it to the worktree it was started in. The
-# `claude` CLI has no equivalent flag: checked on 2.1.220, the options are
-# --permission-mode, --allowedTools/--disallowedTools and
-# --dangerously-skip-permissions, none of which is a filesystem boundary, and
+# WHAT THIS GAVE UP, stated plainly because it is not recoverable by reading the
+# diff: codex ran under `--sandbox workspace-write`, which confines it to its
+# worktree via bubblewrap (see deploy/apparmor-bwrap, installed for exactly
+# that). The claude CLI has no equivalent flag — checked on 2.1.220, the
+# options are --permission-mode, --allowedTools/--disallowedTools and
+# --dangerously-skip-permissions, none of which is a filesystem boundary — and
 # the agent needs Bash to run the repo's test command, so a tool allowlist does
 # not confine it either. This box runs sanad, nolog, hermes, litellm, matrix,
-# ipacommunity and ipauat, which are services other people use, so swapping a
-# confined implementer for an unconfined one is a real regression that a newer
-# model does not pay for.
+# ipacommunity and ipauat, which are services other people use. The implementer
+# is therefore unconfined, the repository CLAUDE.md files are the only restraint
+# on where it writes, and running it under bwrap is filed as its own work.
 #
-# Set AGENTLOOP_IMPLEMENTER to override, space-separated, e.g.
-#   AGENTLOOP_IMPLEMENTER="claude -p --model claude-opus-5 --dangerously-skip-permissions"
-# Two things change if you do. Claude Code can write .git, which is what the
-# codex sandbox blocks and therefore the reason a conflicting pull request
-# cannot currently be rebased (see the loop's own issue on that). And the whole
-# loop then draws on one subscription rather than two, so total throughput falls
-# even though each agent is stronger.
+# What it bought: a stronger model, and the ability to rebase. codex could not,
+# because its sandbox mounts .git read-only, which is why a conflicting pull
+# request had no route out.
+IMPLEMENTER_MODEL = os.environ.get("AGENTLOOP_IMPLEMENTER_MODEL", "claude-opus-5")
 IMPLEMENTER = (os.environ.get("AGENTLOOP_IMPLEMENTER", "").split()
-               or ["codex", "exec", "--sandbox", "workspace-write"])
+               or ["claude", "-p", "--dangerously-skip-permissions",
+                   "--model", IMPLEMENTER_MODEL])
+
+# THE SECOND VOICE. Consulted only on the changes where being wrong is
+# expensive, and deliberately a different family from the judge so it is
+# actually a second perspective rather than the same model agreeing with itself.
+#
+# `astra` is the intended model and it is NOT reachable on this box: codex is
+# authenticated with a ChatGPT account, and the API answers
+#   "The 'astra' model is not supported when using Codex with a ChatGPT account."
+# It needs an OpenAI API key. The name is kept as the default so that adding one
+# switches this on with no code change; until then a consultation simply fails,
+# and a failed consultation is silent by design — see second_voice.consult.
+# Models the ChatGPT account can reach today: gpt-5.6-sol (default), -luna,
+# -terra, gpt-5.5.
+SECOND_VOICE_MODEL = os.environ.get("AGENTLOOP_SECOND_VOICE_MODEL", "astra")
+SECOND_VOICE = (os.environ.get("AGENTLOOP_SECOND_VOICE", "").split()
+                or ["codex", "exec", "--sandbox", "read-only",
+                    "--skip-git-repo-check", "-m", SECOND_VOICE_MODEL])
 
 # THE JUDGE RUNS ON OPUS 5, the current most capable Opus-tier model.
 #

@@ -84,8 +84,16 @@ JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "claude-opus-5")
 # and it must not run the tests: CI already does that, and gate.py refuses to
 # merge without it, so a judge that could run them would only be able to
 # disagree with the authority.
-JUDGE = ["claude", "-p", "--output-format", "json", "--model", JUDGE_MODEL,
-         "--allowedTools", "Read,Grep,Glob"]
+# FLAG ORDER MATTERS AND IT IS NOT COSMETIC. `--allowedTools <tools...>` is
+# VARIADIC, so any positional argument after it is swallowed as another tool
+# name. runner.invoke() appends the prompt as the final positional argument, so
+# with --allowedTools last the judge ran with no prompt at all and the CLI
+# answered "Input must be provided either through stdin or as a prompt argument
+# when using --print". Every review came back unusable, and because an unusable
+# verdict used to read as a rejection, three PRs were failed three times each
+# and escalated with an empty 0/10 review. Keep a single-value flag last.
+JUDGE = ["claude", "-p", "--allowedTools", "Read,Grep,Glob",
+         "--output-format", "json", "--model", JUDGE_MODEL]
 
 
 @dataclass

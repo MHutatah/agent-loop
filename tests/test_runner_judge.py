@@ -103,3 +103,62 @@ def test_verdict_lookup_by_commit():
     assert _verdict_for([], sha) is None
     # no SHA available -> judge rather than silently skip
     assert _verdict_for(passed, "") is None
+
+
+def test_the_prompt_survives_the_judge_flag_order():
+    """`--allowedTools <tools...>` is VARIADIC, so a positional argument after it
+    is swallowed as another tool name. invoke() appends the prompt as the final
+    positional, so with --allowedTools last the judge ran with no prompt and the
+    CLI answered "Input must be provided either through stdin or as a prompt
+    argument when using --print". Every verdict came back unusable.
+    """
+    from agentloop.config import JUDGE
+
+    VARIADIC = {"--allowedTools", "--allowed-tools",
+                "--disallowedTools", "--disallowed-tools"}
+    # invoke() appends the prompt as JUDGE + [prompt], so the prompt lands
+    # immediately after JUDGE[-1]. No variadic flag may own that position.
+    assert JUDGE[-1] not in VARIADIC, JUDGE
+    assert JUDGE[-2] not in VARIADIC, JUDGE
+    # and the tool allowlist is still actually being passed
+    assert "--allowedTools" in JUDGE, JUDGE
+
+
+def test_an_unusable_verdict_holds_instead_of_failing_the_pr(tmp_path):
+    """A JUDGE THAT CANNOT RULE IS NOT A REJECTION. An unusable verdict used to
+    fall through to `problems` as "the reviewer did not pass this PR", which put
+    an agent on the branch three times and escalated it behind an empty
+    "CHANGES REQUESTED - score 0/10" review. One bad flag order failed three
+    green pull requests that way.
+    """
+    from unittest.mock import patch
+
+    from agentloop.config import Config, Repo
+    from agentloop.judge import Verdict
+    from agentloop.watchers import _handle_pr
+    from agentloop.worktree import Workspace
+
+    ws = Workspace(tmp_path, "o/r")
+    ws.logs.mkdir(parents=True)
+    cfg, repo = Config(), Repo(slug="o/r", default_branch="main")
+    pr = {"number": 93, "title": "t", "body": "Closes #4", "labels": [],
+          "mergeable": "MERGEABLE", "headRefName": "agent/4-x", "headRefOid": "abc"}
+
+    class _B:
+        def allow(self): return True
+        def record(self): raise AssertionError("must not spend budget on a non-verdict")
+        def status(self): return "n/a"
+
+    with patch("agentloop.gh.pr_checks_state", return_value="pass"), \
+         patch("agentloop.gh.pr_review_comments", return_value=[]), \
+         patch("agentloop.gh.pr_files", return_value=["lib/x.ts"]), \
+         patch("agentloop.gh.pr_diff", return_value="diff"), \
+         patch("agentloop.gh.pr_review") as review, \
+         patch("agentloop.watchers._run_fixer") as fixer, \
+         patch("agentloop.watchers.judge_pr",
+               return_value=Verdict(False, error="CLI returned no usable verdict")):
+        out = _handle_pr(cfg, repo, ws, _B(), pr)
+
+    fixer.assert_not_called()
+    review.assert_not_called()
+    assert any("could not rule" in line for line in out), out

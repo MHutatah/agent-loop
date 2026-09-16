@@ -35,7 +35,27 @@ MARKER = "<!-- agent-loop -->"
 # but nothing outside it. (`--full-auto` is the deprecated spelling.) Codex also
 # refuses to run outside a git repo unless told otherwise — our worktrees are
 # repos, so that check is a useful backstop and is left on.
-IMPLEMENTER = ["codex", "exec", "--sandbox", "workspace-write"]
+# THE IMPLEMENTER IS STILL CODEX, AND THAT IS A SANDBOX DECISION, NOT A MODEL ONE.
+#
+# `--sandbox workspace-write` confines it to the worktree it was started in. The
+# `claude` CLI has no equivalent flag: checked on 2.1.220, the options are
+# --permission-mode, --allowedTools/--disallowedTools and
+# --dangerously-skip-permissions, none of which is a filesystem boundary, and
+# the agent needs Bash to run the repo's test command, so a tool allowlist does
+# not confine it either. This box runs sanad, nolog, hermes, litellm, matrix,
+# ipacommunity and ipauat, which are services other people use, so swapping a
+# confined implementer for an unconfined one is a real regression that a newer
+# model does not pay for.
+#
+# Set AGENTLOOP_IMPLEMENTER to override, space-separated, e.g.
+#   AGENTLOOP_IMPLEMENTER="claude -p --model claude-opus-5 --dangerously-skip-permissions"
+# Two things change if you do. Claude Code can write .git, which is what the
+# codex sandbox blocks and therefore the reason a conflicting pull request
+# cannot currently be rebased (see the loop's own issue on that). And the whole
+# loop then draws on one subscription rather than two, so total throughput falls
+# even though each agent is stronger.
+IMPLEMENTER = (os.environ.get("AGENTLOOP_IMPLEMENTER", "").split()
+               or ["codex", "exec", "--sandbox", "workspace-write"])
 
 # THE JUDGE RUNS ON OPUS 5, the current most capable Opus-tier model.
 #

@@ -111,3 +111,24 @@ def test_missing_labels_stays_quiet_when_it_cannot_tell():
         raise gh.GhError("no network")
     with patch.object(gh, "run", boom):
         assert gh.missing_labels("o/r", ("agent:ready",)) == []
+
+
+def test_verdicts_from_the_broken_judge_are_void(tmp_path):
+    """The memo is keyed by commit sha, and the pull requests it poisoned had
+    heads that never moved, so it would have served those verdicts forever.
+
+    Every `agent-loop:judged:` marker was written by a judge invoked with
+    `--allowedTools` last, which is variadic: it swallowed the prompt and the
+    judge ruled on nothing. Bumping the marker version retires all of them at
+    once instead of asking anyone to reason about which cached verdict to trust.
+    """
+    from agentloop.watchers import _judged_tag, _verdict_for
+
+    sha = "561a171be5fc1d154695aad92be490dfc8a122ad"
+    old = [{"body": f"**Judge: CHANGES REQUESTED**\n<!-- agent-loop:judged:{sha}:fail -->",
+            "createdAt": "2026-09-16T01:00:00Z"}]
+    assert _verdict_for(old, sha) is None, "a pre-fix verdict must not be honoured"
+
+    fresh = [{"body": f"ok {_judged_tag(sha, False)}", "createdAt": "2026-09-16T02:00:00Z"}]
+    assert _verdict_for(fresh, sha) is False
+    assert _verdict_for([{"body": f"ok {_judged_tag(sha, True)}"}], sha) is True

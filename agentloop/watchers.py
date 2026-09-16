@@ -63,9 +63,19 @@ what is needed — do not rewrite unrelated code, and do not weaken or delete te
 
 
 def _judged_tag(sha: str, passed: bool) -> str:
+    """The memo marker. VERSIONED, and the version has been bumped once.
+
+    Verdicts written as `agent-loop:judged:` came from a judge invoked with
+    `--allowedTools` last, which is variadic, so it swallowed the prompt and the
+    judge ruled on nothing. Those verdicts are void, not merely stale, and they
+    were keyed by commit sha on pull requests whose heads had not moved since,
+    so the memo would have kept serving them forever. Bumping the marker retires
+    every one of them in a single change rather than asking anyone to reason
+    about which cached verdict is trustworthy.
+    """
     """Stamped into a judge comment so a later tick can tell it already ruled on
     this exact commit, and what it decided."""
-    return f"<!-- agent-loop:judged:{sha}:{'pass' if passed else 'fail'} -->"
+    return f"<!-- agent-loop:judged2:{sha}:{'pass' if passed else 'fail'} -->"
 
 
 def _verdict_for(comments: list[dict], sha: str) -> bool | None:
@@ -74,9 +84,9 @@ def _verdict_for(comments: list[dict], sha: str) -> bool | None:
         return None
     for c in comments:
         body = c.get("body") or ""
-        if f"agent-loop:judged:{sha}:pass" in body:
+        if f"agent-loop:judged2:{sha}:pass" in body:
             return True
-        if f"agent-loop:judged:{sha}:fail" in body:
+        if f"agent-loop:judged2:{sha}:fail" in body:
             return False
     return None
 

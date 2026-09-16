@@ -19,7 +19,10 @@ PATH = Path.home() / "agent-loop-work" / "settings.json"
 # (minimum, maximum) for every tunable. A stuck finger or a bad request cannot
 # push the judge budget somewhere that would drain the plan.
 BOUNDS = {
-    "max_judge_calls": (0, 60),
+    # 0 means UNLIMITED, not "never judge". The old ceiling of 60 was sized for
+    # a Pro plan; on Max the guard is only here to stop a crash loop burning the
+    # quota, which it has done once already.
+    "max_judge_calls": (0, 5000),
     "max_concurrent_agents": (1, 8),
     "max_concurrent_per_repo": (1, 4),
     "max_attempts_per_issue": (1, 6),
@@ -28,7 +31,7 @@ BOUNDS = {
 
 @dataclass
 class Settings:
-    max_judge_calls: int = 12
+    max_judge_calls: int = 400
     max_concurrent_agents: int = 2
     # Per repository, so one busy project cannot take every slot. Raising the
     # global cap without this just moves the starvation rather than fixing it.

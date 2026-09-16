@@ -37,11 +37,19 @@ MARKER = "<!-- agent-loop -->"
 # repos, so that check is a useful backstop and is left on.
 IMPLEMENTER = ["codex", "exec", "--sandbox", "workspace-write"]
 
-# Judging is "does this diff meet the stated acceptance criteria" — a task Sonnet
-# does well, and on a Pro plan the quota difference per review is the difference
-# between a handful of PRs a day and many. Override with AGENTLOOP_JUDGE_MODEL
-# (e.g. "opus") when a repo needs a harsher reviewer.
-JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "sonnet")
+# THE JUDGE RUNS ON OPUS 5, the current most capable Opus-tier model.
+#
+# It used to be Sonnet, chosen when the loop shared a Pro plan with interactive
+# work and the quota difference per review decided whether the day got a handful
+# of pull requests or many. On Max that constraint is gone, and the judge is the
+# one place in this system where being right matters more than being cheap: it
+# is a small number of high-leverage calls, and a verdict it gets wrong either
+# merges a defect or holds good work for a day.
+#
+# Exact model IDs only, never a date-suffixed variant. "opus"/"sonnet" bare
+# aliases resolve to whatever the CLI decides is current, which is precisely the
+# ambiguity worth removing from a file that gates merges.
+JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "claude-opus-5")
 # READ-ONLY TOOLS, and a working directory, because a diff is not enough.
 #
 # The judge's own docstring promised to decide whether "an acceptance criterion
@@ -94,7 +102,7 @@ class Config:
     # loop keeps a reserve: it stops judging well before the plan's limit rather
     # than leaving you unable to use Claude yourself. Codex is unaffected — it
     # implements on the separate ChatGPT subscription.
-    max_judge_calls: int = 12
+    max_judge_calls: int = 400
     judge_window_hours: float = 5.0
 
     # Paths an agent may never change and still auto-merge. Touching one forces

@@ -445,7 +445,15 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
             if not budget.allow():
                 out.append(f"PR #{num} judge budget spent ({budget.status()})")
                 return out
-            verdict = judge_pr(issue, gh.pr_diff(repo.slug, num),
+            # THE LOCAL DIFF WHEN WE HAVE THE TREE, and `gh pr diff` only when
+            # we do not. See Workspace.review_diff: the local one leads with a
+            # stat, drops the carriage-return rewrites that made a twenty-line
+            # change read as a rewrite of the permission system, and caps
+            # itself out loud, because the judge is about to read these files
+            # with its own tools anyway.
+            verdict = judge_pr(issue,
+                               ws.review_diff(tree, repo.default_branch)
+                               if tree.exists() else gh.pr_diff(repo.slug, num),
                                cwd=str(tree) if tree.exists() else None,
                                dry=cfg.dry_run)
             if verdict.limited:

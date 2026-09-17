@@ -204,6 +204,49 @@ class Workspace:
         produce anything": see `ahead_of`, and the comment on it."""
         return bool(git(["status", "--porcelain"], path))
 
+    def review_diff(self, path: Path, base: str, *, max_chars: int = 40_000) -> str:
+        """The diff a judge reads: a map first, the noise gone, and a cap.
+
+        THREE THINGS WRONG WITH SENDING `gh pr diff` WHOLE, all measured on
+        2026-09-17 against the calendar epic's pull requests.
+
+        IT IS MOSTLY REDUNDANT. `judge_pr` is called with `cwd` set to this
+        worktree and the judge runs with Read, Grep and Glob, so it reads the
+        files anyway, and the prompt tells it to. Sending 110_000 characters of
+        diff inline pays for the same code twice: once as a diff it was handed
+        and once as the files it opened. The judge's own docstring still claims
+        "no repo, no tools", which stopped being true when the tools were added.
+
+        A QUARTER OF IT WAS CARRIAGE RETURNS. This repository's files are CRLF
+        and `gh pr diff` renders a changed line-ending run as a whole-file
+        rewrite. #109 measured 1546 insertions raw against 1199 with
+        `--ignore-cr-at-eol`, and #108 1131 against 919. That is not only cost:
+        it misleads. `lib/roles.ts` arrived at the judge and at me as +155/-135,
+        a rewrite of the permission system, when the actual change was twenty
+        added lines and nothing touched.
+
+        AND A DIFF WITH NO MAP IS HARD TO RULE ON. The stat goes first so the
+        judge knows the shape of the change before it has read a hunk, which is
+        the thing it was worst at: it twice passed a pull request while citing
+        files that were not in it.
+
+        So: stat, then the diff with line-ending noise ignored, then a cap that
+        names itself and says where the rest is. Truncating silently would be
+        the worst of the three options, because a judge cannot report having
+        seen half of something it was not told was half.
+        """
+        ref = f"origin/{base}...HEAD"
+        stat = git(["diff", "--stat", "--ignore-cr-at-eol", ref], path, check=False)
+        body = git(["diff", "--ignore-cr-at-eol", ref], path, check=False)
+        head = stat or "(no diff against the base)"
+        if len(body) <= max_chars:
+            return f"{head}\n\n{body}"
+        return (f"{head}\n\n{body[:max_chars]}\n\n"
+                f"[This diff is {len(body)} characters and was cut at {max_chars}. "
+                f"You are running INSIDE the worktree it came from, so read the "
+                f"rest with Read and Grep using the paths in the stat above. Do "
+                f"not rule on the part you were shown as though it were whole.]")
+
     def ahead_of(self, path: Path, base: str) -> int:
         """Commits on this worktree that `origin/<base>` does not have.
 

@@ -108,9 +108,54 @@ class Workspace:
             return path, branch
         if path.exists():
             self.remove(issue_number)
+        self._release_branch(branch, path)
         git(["fetch", "origin", base], self.clone)
         git(["worktree", "add", "-B", branch, str(path), f"origin/{base}"], self.clone)
         return path, branch
+
+    def _release_branch(self, branch: str, keep: Path) -> None:
+        """Drop any OTHER worktree still holding `branch`, so create() can have it.
+
+        A tree is named after the number that was being worked, and the fixer
+        names its trees after the PULL REQUEST while the issue starter names
+        them after the ISSUE. One branch therefore has two possible homes:
+        `agent/52-story-...` lived in `trees/issue-108`, because #108 was the
+        pull request for issue #52.
+
+        Nothing ever removed it. So the moment issue #52 was re-queued, every
+        tick died on
+
+            fatal: 'agent/52-story-cancel-an-event-and-keep-it-struck' is
+            already used by worktree at '.../trees/issue-108'
+
+        and the loop went idle while reporting no ready issues, which is the
+        failure that looks healthiest. It had 35 trees, one per issue ever
+        worked, on 2026-09-17.
+
+        Removing the other tree is safe HERE and only here: the next statement
+        is `worktree add -B`, which resets the branch to the base anyway, so a
+        caller reaching this line has already decided the branch's contents are
+        going. That is the opposite of attach(), which exists precisely because
+        create() discards commits, and the sha is logged so the reflog can find
+        anything that mattered.
+        """
+        listing = git(["worktree", "list", "--porcelain"], self.clone, check=False)
+        here, wanted = None, f"refs/heads/{branch}"
+        for line in (listing or "").splitlines():
+            if line.startswith("worktree "):
+                here = Path(line[len("worktree "):].strip())
+            elif line.startswith("branch ") and line[len("branch "):].strip() == wanted:
+                if here is None or here == keep:
+                    continue
+                # Only ever our own trees. Another checkout of this clone
+                # somewhere else on the box is not ours to delete.
+                if self.trees not in here.parents:
+                    continue
+                at = git(["rev-parse", "--short", "HEAD"], here, check=False)
+                print(f"[worktree] {branch} was held by {here.name} at {at}; "
+                      f"removing it so the branch can be re-created")
+                git(["worktree", "remove", "--force", str(here)], self.clone, check=False)
+        git(["worktree", "prune"], self.clone, check=False)
 
     def attach(self, issue_number: int, branch: str) -> Path:
         """A worktree on an EXISTING pull request branch, taken from origin.

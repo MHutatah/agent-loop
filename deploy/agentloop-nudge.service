@@ -1,0 +1,9 @@
+[Unit]
+Description=agent-loop: nudge the overseer so the loop keeps moving
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/agent-loop/deploy/nudge-overseer.sh
+TimeoutStartSec=120

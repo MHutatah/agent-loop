@@ -5,6 +5,7 @@ success, a flash that never decoded, a page that grew without bound, and a
 GitHub outage that looked like an empty inbox.
 """
 import json
+import sys
 
 import pytest
 
@@ -119,7 +120,11 @@ def test_failed_action_is_reported_as_failure():
 
 
 def test_successful_action_reports_ok():
-    out, ok = console._sh(["python", "-c", "print('hi')"])
+    # THE INTERPRETER RUNNING THIS TEST, not the name "python". The box this
+    # loop runs on has python3 and no python at all, so this was the one
+    # failing check in an otherwise green suite there, permanently, which
+    # makes "the suite passes" useless as a signal on the machine that matters.
+    out, ok = console._sh([sys.executable, "-c", "print('hi')"])
     assert ok and "hi" in out
 
 

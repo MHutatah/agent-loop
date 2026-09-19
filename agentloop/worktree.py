@@ -289,6 +289,68 @@ class Workspace:
              "-c", "user.email=agent-loop@users.noreply.github.com",
              "commit", "-m", message], path)
 
+    def rebase_onto(self, path: Path, base: str, *, branch: str = "") -> str:
+        """Put this branch on top of origin/<base>. Returns what happened.
+
+        THE LOOP OWNS THE REBASE. It used to ask the agent to "fetch and rebase
+        onto origin/<base>", and issue #8 is the account of why that could not
+        work: the implementer was `codex exec --sandbox workspace-write`, which
+        mounts .git read-only, so the agent resolved the conflicts correctly in
+        a temporary clone, reported success, and the loop committed that tree on
+        top of the UN-rebased branch. The pull request stayed conflicting and
+        its diff grew by absorbing the base's own content as additions.
+
+        The implementer is unsandboxed now, so an agent could do it, and it
+        still should not: a rebase is deterministic and has one right answer, so
+        asking a language model to perform it buys nothing and costs a session.
+        Here it is four git commands that either work or say what collided.
+
+        AND IT RUNS ON EVERY PULL REQUEST, not only the conflicting ones, which
+        is the part that matters. Of eleven pull requests merged on 2026-09-19,
+        nine needed a rebase and only two were reported CONFLICTING: the rest
+        were merely behind, and being behind is what makes the NEXT merge
+        conflict. Rebasing early is how that conflict never happens, which is
+        why this is called before the conflict branch rather than inside it.
+
+        Returns 'current' when the branch already sits on the base, 'rebased'
+        when it was rewritten and the caller should push, and
+        'conflicts:<comma separated files>' when the rebase was aborted.
+        """
+        git(["fetch", "origin", base], self.clone)
+        # The branch too, so --force-with-lease has an honest expectation.
+        # Unfetched, the lease is checked against a stale tracking ref and a
+        # push that should succeed is refused, which reads as a loop that
+        # cannot push rather than as a missing fetch.
+        if branch:
+            git(["fetch", "origin", branch], self.clone, check=False)
+
+        if git(["rev-list", "--count", f"HEAD..origin/{base}"], path, check=False) in ("", "0"):
+            return "current"
+
+        git(["rebase", f"origin/{base}"], path, check=False)
+        conflicted = [f for f in git(["diff", "--name-only", "--diff-filter=U"],
+                                     path, check=False).split("\n") if f]
+        if not conflicted and not self._rebase_in_progress(path):
+            return "rebased"
+
+        # ABORTED rather than left mid-rebase. A worktree stopped in a rebase is
+        # one every later tick misreads: `status --porcelain` is dirty, so the
+        # collector would commit conflict markers as though they were work, and
+        # `ahead_of` stops meaning anything. The fixer is told which files
+        # collided instead, which is more than it was ever told before.
+        git(["rebase", "--abort"], path, check=False)
+        return "conflicts:" + ",".join(sorted(set(conflicted)))
+
+    def _rebase_in_progress(self, path: Path) -> bool:
+        """A rebase can stop without leaving an unmerged file, on an empty
+        commit or a failed `exec`, and that still has to count as stopped."""
+        for name in ("rebase-merge", "rebase-apply"):
+            where = git(["rev-parse", "--git-path", name], path, check=False)
+            if where and (Path(where) if Path(where).is_absolute()
+                          else path / where).exists():
+                return True
+        return False
+
     def push(self, path: Path, branch: str, *, base: str = "") -> None:
         """Push, refusing to push away work.
 

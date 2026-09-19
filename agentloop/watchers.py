@@ -161,7 +161,7 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
         return out
 
     ws.ensure_clone(dry=cfg.dry_run)
-    for issue in issues[:free_slots]:
+    for issue in _spread_by_area(issues, free_slots, ws, mine):
         n, title = issue["number"], issue["title"]
         try:
             path, _branch = ws.create(n, title, repo.default_branch, dry=cfg.dry_run)
@@ -179,6 +179,61 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
             gh.remove_label(repo.slug, n, LABEL_WIP, dry=cfg.dry_run)
             out.append(f"#{n} error: {exc}")
     return out
+
+
+def _area_of(issue: dict) -> str:
+    """The `epic:` label, which is how this backlog names an area of the code."""
+    for label in issue.get("labels", []):
+        name = label.get("name", "") if isinstance(label, dict) else str(label)
+        if name.startswith("epic:"):
+            return name
+    return ""
+
+
+def _spread_by_area(issues: list[dict], slots: int, ws: Workspace,
+                    running: list[int]) -> list[dict]:
+    """Pick `slots` issues, preferring areas nothing is already working in.
+
+    WHY NOT JUST THE FIRST N. Every collision worth reviewing on 2026-09-19 came
+    from agents stacked in one epic. Four calendar stories ran at once and the
+    result was nine rebases, two pull requests thrown away and re-queued, two
+    modules built twice under different names, and a tenancy predicate that
+    nearly vanished in a conflict resolution. The three that ran in different
+    epics that day — #118 platform, #79 path, #14 library — merged clean.
+
+    So the cap was never the problem and raising it was not the fix: FOUR agents
+    in four epics cost nothing, four in one epic cost a night. Dependencies
+    cluster a wave into one epic all by themselves, which is exactly when this
+    matters, and it is why ordering by issue number silently picks the worst
+    possible set.
+
+    A soft preference, not a rule. When the only ready work is in one epic it
+    still runs, because idling with work available is worse than a rebase: an
+    unmerged pull request does not delay itself, it stops the next wave from
+    being queued at all.
+    """
+    taken: set[str] = set()
+    # Areas already busy count as taken, so a tick that starts one agent does
+    # not undo the spread the previous tick achieved.
+    for number in running:
+        for issue in issues:
+            if issue["number"] == number:
+                taken.add(_area_of(issue))
+    picked: list[dict] = []
+    for pool in (
+        [i for i in issues if _area_of(i) not in taken],   # fresh areas first
+        issues,                                            # then anything left
+    ):
+        for issue in pool:
+            if len(picked) >= slots:
+                return picked
+            if issue in picked:
+                continue
+            area = _area_of(issue)
+            if pool is issues or area not in taken:
+                picked.append(issue)
+                taken.add(area)
+    return picked
 
 
 def _reap(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
@@ -407,20 +462,52 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
     files = gh.pr_files(repo.slug, num)
     issue = {"number": num, "title": pr["title"], "body": pr.get("body") or ""}
 
+    # REBASE FIRST, AND OURSELVES. See Workspace.rebase_onto and issue #8: a
+    # branch that is merely behind is what makes the next merge conflict, so the
+    # cheap moment to move it is now, before anybody judges or reviews it. Only
+    # a real collision goes to the fixer, and it goes with the file list.
+    collided = ""
+    if tree.exists() and not cfg.dry_run:
+        try:
+            moved = ws.rebase_onto(tree, repo.default_branch,
+                                   branch=pr.get("headRefName") or "")
+            if moved == "rebased":
+                ws.push(tree, pr.get("headRefName") or "", base=repo.default_branch)
+                out.append(f"PR #{num} rebased onto {repo.default_branch}")
+                # The pull request that GitHub described is not the one on disk
+                # any more: its head moved, so CI has to run again and any
+                # verdict against the old head is about code that no longer
+                # exists. Come back next tick rather than judging a stale sha.
+                return out
+            if moved.startswith("conflicts:"):
+                collided = moved.split(":", 1)[1]
+        except RuntimeError as error:
+            # A rebase we cannot do is not a reason to stop looking at the PR.
+            out.append(f"PR #{num} could not be rebased: {error}")
+
     # CI red or a human asked for changes -> put an agent back on it
     problems: list[str] = []
-    if (pr.get("mergeable") or "").upper() == "CONFLICTING":
+    if collided or (pr.get("mergeable") or "").upper() == "CONFLICTING":
         # A CONFLICTING PR WAS A DEAD END. gate.decide refuses it with "merge
         # conflict" and nothing ever rebased it, so the PR sat open forever with
         # a correct reason and no route out. That is the normal outcome as soon
         # as two agents work one area in parallel: the first merge conflicts the
         # second, which is exactly what happened to ipa-community #91 the moment
         # #90 went in. Hand it to the fixer instead of holding it.
+        # AND IT NO LONGER ASKS FOR THE REBASE. The loop already attempted it
+        # above and aborted, so the working tree is clean and on the branch as
+        # it was. What the fixer is asked for is the thing only judgement can
+        # do: reconcile the two intents in the named files, and then commit them
+        # as ordinary work for the loop to rebase on the next tick.
+        where = f" The files that collided: {collided}." if collided else ""
         problems.append(
-            f"This branch conflicts with origin/{repo.default_branch}. Fetch and "
-            "rebase onto it, resolve every conflict by KEEPING BOTH SIDES' "
-            "intent rather than discarding either, and do not weaken or delete a "
-            "test to make the merge simpler. Then re-run the suite.")
+            f"This branch cannot be replayed onto origin/{repo.default_branch} "
+            f"without a decision.{where} Do NOT run git rebase: the loop owns "
+            "that and has already put the tree back. Reconcile those files by "
+            "KEEPING BOTH SIDES' intent rather than discarding either, never "
+            "weaken or delete a test to make the merge simpler, and re-run the "
+            "suite. Two things that do the same job under two different names "
+            "are one thing: keep the name already on the base branch.")
     if checks == "fail":
         problems.append("CI is failing — read the failing job output and fix it.")
     if human:

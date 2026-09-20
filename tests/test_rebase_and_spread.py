@@ -337,3 +337,17 @@ def test_the_watcher_itself_queues_and_not_only_the_helper(tmp_path):
     assert (42, "agent:ready") in labelled, (
         "the watcher has to queue, or the loop starves while reporting no ready issues")
     assert any("#42 queued" in line for line in out)
+
+
+def test_an_issue_that_already_has_a_pull_request_is_not_queued(tmp_path):
+    """It labelled ipa-community #9 ready while #9 already had #131 open. The
+    start loop filters the same set, so nothing ran twice, but a ready label on
+    work that is already written is a lie about what is next."""
+    backlog = [_backlog_issue(9, "library", []), _backlog_issue(10, "library", [])]
+    labelled = []
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.backlog", return_value=backlog), \
+         patch("agentloop.gh.add_label",
+               side_effect=lambda repo, n, label, dry=False: labelled.append(n)):
+        _queue_ready(cfg, cfg.repos[0], 5, {9})
+    assert labelled == [10]

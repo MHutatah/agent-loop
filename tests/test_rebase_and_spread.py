@@ -9,7 +9,9 @@ import subprocess
 from unittest.mock import patch
 
 from agentloop.config import Config, Repo
-from agentloop.watchers import _area_of, _spread_by_area, issue_watcher
+from agentloop.watchers import (
+    _area_of, _queue_ready, _spread_by_area, issue_watcher,
+)
 from agentloop.worktree import Workspace
 
 
@@ -155,6 +157,7 @@ def test_the_watcher_itself_spreads_and_not_only_the_helper(tmp_path):
     cfg = Config(repos=[Repo(slug="o/r")], max_concurrent_agents=2,
                  max_concurrent_per_repo=2)
     with patch("agentloop.gh.ready_issues", return_value=ready), \
+         patch("agentloop.gh.backlog", return_value=[]), \
          patch("agentloop.gh.issues_with_open_pr", return_value=set()), \
          patch("agentloop.gh.add_label"), \
          patch("agentloop.tmux.live_windows", return_value=[]), \
@@ -225,3 +228,109 @@ def test_a_merged_pr_does_not_get_a_fixer(tmp_path):
     assert not attached.called
     assert unlabel.called, "and the agent:pr label has to come off, or it is seen every tick"
     assert any("no longer open" in line for line in out)
+
+
+# ── the dependency queue, which replaced the overseer ────────────────────────
+def _backlog_issue(number, epic, depends, kind="type:story", extra=()):
+    labels = [{"name": kind}] + [{"name": n} for n in extra]
+    if epic:
+        labels.append({"name": f"epic:{epic}"})
+    dep = ", ".join(f"#{d}" for d in depends) if depends else "nothing"
+    return {"number": number, "title": f"story {number}", "labels": labels,
+            "body": f"**Epic:** X | **Size:** M | **Depends on:** {dep}\n\nbody"}
+
+
+def test_an_issue_whose_dependencies_are_closed_gets_queued(tmp_path):
+    """The overseer's one good job, as a parse. #7 depends on #3, which is not
+    in the open backlog, so it has closed and #7 is startable."""
+    backlog = [_backlog_issue(7, "calendar", [3])]
+    labelled = []
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.backlog", return_value=backlog), \
+         patch("agentloop.gh.add_label",
+               side_effect=lambda repo, n, label, dry=False: labelled.append((n, label))):
+        out = _queue_ready(cfg, cfg.repos[0], 3)
+    assert labelled == [(7, "agent:ready")]
+    assert any("#7 queued" in line for line in out)
+
+
+def test_an_issue_still_blocked_is_left_alone(tmp_path):
+    """#8 depends on #7, and #7 is open, so #8 is not startable. Queueing it
+    would put an agent on work whose foundation does not exist yet."""
+    backlog = [_backlog_issue(7, "calendar", []), _backlog_issue(8, "calendar", [7])]
+    labelled = []
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.backlog", return_value=backlog), \
+         patch("agentloop.gh.add_label",
+               side_effect=lambda repo, n, label, dry=False: labelled.append(n)):
+        _queue_ready(cfg, cfg.repos[0], 5)
+    assert labelled == [7], "only the unblocked one"
+
+
+def test_it_stops_once_enough_are_in_hand(tmp_path):
+    """Labelling the whole backlog would make agent:ready meaningless as a
+    statement about what is next, and hand the spread a pile, not a queue."""
+    backlog = [_backlog_issue(n, "calendar", []) for n in range(10, 20)]
+    labelled = []
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.backlog", return_value=backlog), \
+         patch("agentloop.gh.add_label",
+               side_effect=lambda repo, n, label, dry=False: labelled.append(n)):
+        _queue_ready(cfg, cfg.repos[0], 3)
+    assert labelled == [10, 11, 12], "lowest first, and it stops at three"
+
+
+def test_issues_already_under_the_loop_or_escalated_are_never_requeued(tmp_path):
+    """Re-adding agent:ready to an escalated issue is how a confused agent got
+    put straight back on the thing somebody was just asked to look at."""
+    backlog = [
+        _backlog_issue(1, "a", [], extra=["agent:needs-human"]),
+        _backlog_issue(2, "a", [], extra=["agent:working"]),
+        _backlog_issue(3, "a", [], extra=["agent:ready"]),
+        _backlog_issue(4, "a", [], extra=["agent:pr"]),
+        _backlog_issue(5, "a", [], extra=["agent:stop"]),
+        _backlog_issue(6, "a", []),
+    ]
+    labelled = []
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.backlog", return_value=backlog), \
+         patch("agentloop.gh.add_label",
+               side_effect=lambda repo, n, label, dry=False: labelled.append(n)):
+        _queue_ready(cfg, cfg.repos[0], 9)
+    assert labelled == [6]
+
+
+def test_an_epic_or_a_question_is_not_work(tmp_path):
+    backlog = [_backlog_issue(1, "a", [], kind="type:epic"),
+               _backlog_issue(2, "a", [], kind="type:question"),
+               _backlog_issue(3, "a", [], kind="type:spike")]
+    labelled = []
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.backlog", return_value=backlog), \
+         patch("agentloop.gh.add_label",
+               side_effect=lambda repo, n, label, dry=False: labelled.append(n)):
+        _queue_ready(cfg, cfg.repos[0], 9)
+    assert labelled == [3], "stories and spikes are work; epics and questions are not"
+
+
+def test_the_watcher_itself_queues_and_not_only_the_helper(tmp_path):
+    """The five queue tests above call _queue_ready directly, so they pass with
+    the call site removed. This one drives issue_watcher, which is the only way
+    to catch a loop that has stopped queueing and reports a finished backlog."""
+    backlog = [_backlog_issue(42, "library", [])]
+    labelled = []
+
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.backlog", return_value=backlog), \
+         patch("agentloop.gh.ready_issues", return_value=[]), \
+         patch("agentloop.gh.issues_with_open_pr", return_value=set()), \
+         patch("agentloop.gh.add_label",
+               side_effect=lambda repo, n, label, dry=False: labelled.append((n, label))), \
+         patch("agentloop.tmux.live_windows", return_value=[]), \
+         patch("agentloop.watchers._collect_finished", return_value=[]), \
+         patch("agentloop.watchers._reap", return_value=[]):
+        out = issue_watcher(cfg, cfg.repos[0], tmp_path)
+
+    assert (42, "agent:ready") in labelled, (
+        "the watcher has to queue, or the loop starves while reporting no ready issues")
+    assert any("#42 queued" in line for line in out)

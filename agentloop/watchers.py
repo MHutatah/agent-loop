@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from pathlib import Path
 
 from agentloop import gh, second_voice, tmux
@@ -125,6 +126,14 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
     out += _collect_finished(cfg, repo, ws)
     out += _reap(cfg, repo, ws)
 
+    # QUEUE BEFORE READING THE QUEUE. Nothing else labels an issue ready any
+    # more: that was the overseer, poked hourly, switched off because its merge
+    # decisions were wrong six times out of eight. Queueing was the half it got
+    # right and it is not a judgement call, so it lives here as a parse. A
+    # couple more than can run, so the queue says what is next rather than being
+    # a copy of the backlog.
+    out += _queue_ready(cfg, repo, cfg.max_concurrent_per_repo + 2)
+
     issues = gh.ready_issues(repo.slug, LABEL_READY, LABEL_WIP, LABEL_STOP,
                              LABEL_NEEDS_HUMAN)
 
@@ -178,6 +187,71 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
             log.exception("issue #%s failed to start", n)
             gh.remove_label(repo.slug, n, LABEL_WIP, dry=cfg.dry_run)
             out.append(f"#{n} error: {exc}")
+    return out
+
+
+DEPENDS = re.compile(r"Depends on:?\**\s*(.*)")
+
+
+def _queue_ready(cfg: Config, repo: Repo, want: int) -> list[str]:
+    """Label issues whose dependencies have all closed, up to `want` in hand.
+
+    THIS REPLACES THE ONE THING THE OVERSEER DID WELL. That was an interactive
+    Claude session poked hourly to "queue any issue whose Depends on are all
+    closed", and it was switched off on 2026-09-20 because its other job,
+    deciding what to merge, was wrong six times out of eight. Queueing is not a
+    judgement call: the dependency is written in the issue body, so it is a
+    parse and a set membership test, and an hourly language model was the wrong
+    tool for it at any price.
+
+    WITHOUT THIS THE LOOP STARVES SILENTLY, which is the worst shape available:
+    the timers keep running, every tick reports "no ready issues", and that
+    reads exactly like a finished backlog rather than eighty-eight open issues
+    nobody labelled.
+
+    It stops at `want` rather than labelling everything. The cap already limits
+    how many agents run, so labelling the backlog would change nothing except to
+    make `agent:ready` stop meaning "this is next" and to hand _spread_by_area a
+    pile instead of a queue.
+
+    A dependency absent from the open backlog counts as closed, because the list
+    is of OPEN issues: anything missing from it is closed or was never real, and
+    both mean it is not blocking.
+    """
+    out: list[str] = []
+    issues = gh.backlog(repo.slug)
+    if not issues:
+        return out
+    open_numbers = {i["number"] for i in issues}
+
+    def labels(issue: dict) -> set[str]:
+        return {l["name"] for l in issue.get("labels", []) if isinstance(l, dict)}
+
+    controlled = {LABEL_READY, LABEL_WIP, LABEL_STOP, LABEL_PR, LABEL_NEEDS_HUMAN}
+    in_hand = sum(1 for i in issues if LABEL_READY in labels(i))
+    candidates = []
+    for issue in issues:
+        names = labels(issue)
+        if names & controlled:            # queued, working, stopped, escalated,
+            continue                      # or already carrying a pull request
+        if not names & {"type:story", "type:spike"}:
+            continue                      # an epic or a question is not work
+        head = (issue.get("body") or "").split("\n")[0]
+        found = DEPENDS.search(head)
+        blockers = [int(n) for n in re.findall(r"#(\d+)", found.group(1))] if found else []
+        if any(b in open_numbers for b in blockers):
+            continue
+        candidates.append(issue)
+
+    # Lowest number first: in this backlog that is roughly dependency order, and
+    # it is at least stable. A queue that reshuffles every tick is one nobody can
+    # predict or interrupt.
+    for issue in sorted(candidates, key=lambda i: i["number"]):
+        if in_hand >= want:
+            break
+        gh.add_label(repo.slug, issue["number"], LABEL_READY, dry=cfg.dry_run)
+        in_hand += 1
+        out.append(f"#{issue['number']} queued: {issue['title']}")
     return out
 
 

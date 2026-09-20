@@ -138,6 +138,18 @@ def pr_diff(repo: str, number: int, max_chars: int = 120_000) -> str:
     return run(["pr", "diff", str(number), "--repo", repo])[:max_chars]
 
 
+def pr_state(repo: str, number: int) -> str:
+    """OPEN, MERGED or CLOSED, asked fresh.
+
+    The pull request list a pass works from is a snapshot, and anything that
+    costs an agent session should confirm the pull request still exists before
+    paying for it. Returns OPEN when the call fails, because a network blip must
+    not look like a merge and silently stop the loop fixing things.
+    """
+    data = _json(["pr", "view", str(number), "--repo", repo, "--json", "state"])
+    return str((data or {}).get("state") or "OPEN").upper()
+
+
 def pr_files(repo: str, number: int) -> list[str]:
     data = _json(["pr", "view", str(number), "--repo", repo, "--json", "files"])
     return [f["path"] for f in (data or {}).get("files", [])]

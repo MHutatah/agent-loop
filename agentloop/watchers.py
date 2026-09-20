@@ -126,17 +126,6 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
     out += _collect_finished(cfg, repo, ws)
     out += _reap(cfg, repo, ws)
 
-    # QUEUE BEFORE READING THE QUEUE. Nothing else labels an issue ready any
-    # more: that was the overseer, poked hourly, switched off because its merge
-    # decisions were wrong six times out of eight. Queueing was the half it got
-    # right and it is not a judgement call, so it lives here as a parse. A
-    # couple more than can run, so the queue says what is next rather than being
-    # a copy of the backlog.
-    out += _queue_ready(cfg, repo, cfg.max_concurrent_per_repo + 2)
-
-    issues = gh.ready_issues(repo.slug, LABEL_READY, LABEL_WIP, LABEL_STOP,
-                             LABEL_NEEDS_HUMAN)
-
     # AN ISSUE THAT ALREADY HAS AN OPEN PR IS NOT WAITING TO BE STARTED, and the
     # labels cannot be trusted to say so within one tick. GitHub's issue-list
     # index is eventually consistent: the collector above removes agent:ready
@@ -146,7 +135,25 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
     #
     # The PR is the durable fact, so it is the one to filter on. This also
     # covers a stale ready label left by hand and a restart mid-collection.
+    #
+    # Fetched BEFORE the queue rather than after, because the queue needs it
+    # too: on 2026-09-20 it labelled ipa-community #9 ready while #9 already had
+    # pull request #131 open. Harmless, because the start loop below filters the
+    # same set, but a ready label on work that is already written is a lie about
+    # what is next.
     claimed = gh.issues_with_open_pr(repo.slug, LABEL_PR)
+
+    # QUEUE BEFORE READING THE QUEUE. Nothing else labels an issue ready any
+    # more: that was the overseer, poked hourly, switched off because its merge
+    # decisions were wrong six times out of eight. Queueing was the half it got
+    # right and it is not a judgement call, so it lives here as a parse. A
+    # couple more than can run, so the queue says what is next rather than being
+    # a copy of the backlog.
+    out += _queue_ready(cfg, repo, cfg.max_concurrent_per_repo + 2, claimed)
+
+    issues = gh.ready_issues(repo.slug, LABEL_READY, LABEL_WIP, LABEL_STOP,
+                             LABEL_NEEDS_HUMAN)
+
     if claimed:
         blocked = [i for i in issues if i["number"] in claimed]
         issues = [i for i in issues if i["number"] not in claimed]
@@ -193,7 +200,8 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
 DEPENDS = re.compile(r"Depends on:?\**\s*(.*)")
 
 
-def _queue_ready(cfg: Config, repo: Repo, want: int) -> list[str]:
+def _queue_ready(cfg: Config, repo: Repo, want: int,
+                 claimed: set[int] | None = None) -> list[str]:
     """Label issues whose dependencies have all closed, up to `want` in hand.
 
     THIS REPLACES THE ONE THING THE OVERSEER DID WELL. That was an interactive
@@ -232,8 +240,10 @@ def _queue_ready(cfg: Config, repo: Repo, want: int) -> list[str]:
     candidates = []
     for issue in issues:
         names = labels(issue)
-        if names & controlled:            # queued, working, stopped, escalated,
-            continue                      # or already carrying a pull request
+        if names & controlled:            # queued, working, stopped or escalated
+            continue
+        if issue["number"] in (claimed or set()):
+            continue                      # the work is already written
         if not names & {"type:story", "type:spike"}:
             continue                      # an epic or a question is not work
         head = (issue.get("body") or "").split("\n")[0]

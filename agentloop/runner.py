@@ -16,9 +16,27 @@ from dataclasses import dataclass
 log = logging.getLogger("agentloop.runner")
 
 # Phrases either CLI emits when the plan's quota is exhausted.
+# WRITTEN FROM MESSAGES ACTUALLY OBSERVED, not from imagination, because the
+# first version of this was the latter and it cost a day.
+#
+# It had `usage limit` and the CLI says "You've hit your SESSION limit · resets
+# 4am (UTC)". One word out, so looks_limited returned False, so a transient
+# limit took the ordinary failure path: ten ipa-community issues were labelled
+# agent:needs-human between 02:00 and 04:00 on 2026-09-20 and the loop sat idle
+# for seventeen hours with a full queue and nothing wrong with any of them.
+#
+# The mechanism around this was right the whole time. _collect_finished already
+# releases a limited run without a reason so no attempt is burned and no help is
+# called for. Only the recognition was broken, which is the worst place for a
+# bug like this to be: every part that reads correctly still does nothing.
+#
+# So: match the shape rather than one vendor's phrasing. "hit your X limit" and
+# "resets <time>" are both load-bearing, and tests/test_limits.py pins the exact
+# strings seen in production so a reworded CLI is a failing test.
 _LIMIT_PATTERNS = re.compile(
-    r"rate.?limit|usage limit|quota|too many requests|429|"
-    r"limit reached|try again (later|in)|upgrade your plan",
+    r"rate.?limit|usage limit|session limit|quota|too many requests|429|"
+    r"limit reached|hit your \w+ limit|resets? (at )?\d{1,2}\s*(am|pm|:)|"
+    r"try again (later|in)|upgrade your plan",
     re.I,
 )
 

@@ -10,7 +10,10 @@ from unittest.mock import patch
 
 from agentloop.config import Config, Repo
 from agentloop.watchers import (
-    _area_of, _queue_ready, _spread_by_area, issue_watcher,
+    _area_of,
+    _queue_ready,
+    _spread_by_area,
+    issue_watcher,
 )
 from agentloop.worktree import Workspace
 

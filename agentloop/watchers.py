@@ -225,7 +225,7 @@ def _queue_ready(cfg: Config, repo: Repo, want: int) -> list[str]:
     open_numbers = {i["number"] for i in issues}
 
     def labels(issue: dict) -> set[str]:
-        return {l["name"] for l in issue.get("labels", []) if isinstance(l, dict)}
+        return {lb["name"] for lb in issue.get("labels", []) if isinstance(lb, dict)}
 
     controlled = {LABEL_READY, LABEL_WIP, LABEL_STOP, LABEL_PR, LABEL_NEEDS_HUMAN}
     in_hand = sum(1 for i in issues if LABEL_READY in labels(i))

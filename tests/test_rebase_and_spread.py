@@ -198,3 +198,30 @@ def test_a_rebased_pr_is_pushed_and_the_tick_stops_there(tmp_path):
     assert pushed.called, "a rebased branch has to be pushed or the rebase is local only"
     assert judged == [], "nothing may be judged against the sha the rebase replaced"
     assert any("rebased onto main" in line for line in out)
+
+
+def test_a_merged_pr_does_not_get_a_fixer(tmp_path):
+    """#128 was merged while a pass was mid-flight, and the fixer started anyway
+    on the strength of the merge note being read as a reviewer comment. It then
+    died on `couldn't find remote ref`, having already been spawned.
+
+    A snapshot list plus a slow tick means this window always exists, so the
+    check belongs immediately before the spend."""
+    from agentloop.watchers import _run_fixer
+
+    out = []
+    cfg = Config(repos=[Repo(slug="o/r")])
+    ws = Workspace(tmp_path, "o/r")
+    pr = {"number": 128, "headRefName": "agent/79-x"}
+    issue = {"number": 79, "title": "t", "body": "b"}
+
+    with patch("agentloop.gh.pr_state", return_value="MERGED"), \
+         patch("agentloop.gh.remove_label") as unlabel, \
+         patch("agentloop.tmux.spawn") as spawned, \
+         patch("agentloop.worktree.Workspace.attach") as attached:
+        _run_fixer(cfg, cfg.repos[0], ws, 128, pr, issue, ["CI is failing"], out)
+
+    assert not spawned.called, "no agent session may be spent on a merged PR"
+    assert not attached.called
+    assert unlabel.called, "and the agent:pr label has to come off, or it is seen every tick"
+    assert any("no longer open" in line for line in out)

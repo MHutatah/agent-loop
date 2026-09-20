@@ -615,6 +615,17 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
 
 
 def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
+    # STILL OPEN? The pull request list was fetched at the top of the pass and a
+    # tick takes a while, so a human merging in that window leaves this function
+    # about to spend a whole agent session on work that has already landed. It
+    # happened on 2026-09-20: #128 was merged, its branch deleted, and the fixer
+    # started anyway on the strength of the merge note as a "reviewer comment",
+    # then died on `couldn't find remote ref`. One cheap call before the
+    # expensive one, and only here, where the cost actually is.
+    if not cfg.dry_run and gh.pr_state(repo.slug, num) != "OPEN":
+        out.append(f"PR #{num} is no longer open, not starting a fixer")
+        gh.remove_label(repo.slug, num, LABEL_PR, dry=cfg.dry_run)
+        return
     try:
         path = ws.trees / f"issue-{num}"
         if not cfg.dry_run and not path.exists():

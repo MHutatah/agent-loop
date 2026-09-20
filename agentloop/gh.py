@@ -39,6 +39,19 @@ def _json(args: list[str], cwd: str | None = None):
 
 
 # ── issues ───────────────────────────────────────────────────────────────────
+def backlog(repo: str, limit: int = 200) -> list[dict]:
+    """Every open issue with its labels, for the dependency queue.
+
+    One call rather than one per issue: a backlog of ninety would otherwise be
+    ninety `gh issue view` calls every ten minutes to answer a question that is
+    entirely in the list output already.
+    """
+    return _json([
+        "issue", "list", "--repo", repo, "--state", "open",
+        "--limit", str(limit), "--json", "number,title,body,labels",
+    ]) or []
+
+
 def ready_issues(repo: str, ready_label: str, wip_label: str,
                  stop_label: str, needs_human_label: str = "") -> list[dict]:
     """Open issues labelled ready, not being worked, not stopped, not escalated.

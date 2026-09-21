@@ -57,6 +57,33 @@ def looks_limited(text: str) -> bool:
     return bool(_LIMIT_PATTERNS.search(text or ""))
 
 
+# Lines both CLIs print on stderr whether or not anything went wrong. codex
+# writes a banner there on EVERY run, including successful ones, so the old
+# `stderr[:400]` reported the banner and truncated the actual reason off the
+# end. For a day that meant every failed consultation was logged as "second
+# voice unavailable: Reading additional input from stdin...", which sent the
+# diagnosis at the stdin handling and away from the real cause, an unreachable
+# model named four lines further down.
+_NOISE = re.compile(
+    r"^\s*(-{4,}|Reading additional input from stdin\.*|OpenAI Codex v[\d.]+|"
+    r"workdir:|model:|provider:|approval:|sandbox:|reasoning (effort|summaries):|"
+    r"session id:|tokens used)",
+    re.I,
+)
+
+
+def _why(stderr: str | None) -> str:
+    """The useful part of a failed run's stderr.
+
+    Drops the known banner lines, then keeps the TAIL rather than the head:
+    a CLI prints its preamble first and its reason last, so the end of stderr
+    is where the answer is.
+    """
+    lines = [ln for ln in (stderr or "").splitlines()
+             if ln.strip() and not _NOISE.match(ln)]
+    return "\n".join(lines)[-400:].strip() or "non-zero exit"
+
+
 def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
            timeout: int = 1800, dry: bool = False) -> AgentResult:
     """Run one agent CLI once. Never raises for CLI failure — returns ok=False."""
@@ -95,7 +122,7 @@ def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
     combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
     if proc.returncode != 0:
         return AgentResult(False, limited=looks_limited(combined),
-                           error=(proc.stderr or "non-zero exit").strip()[:400])
+                           error=_why(proc.stderr))
     if not (proc.stdout or "").strip() and looks_limited(combined):
         return AgentResult(False, limited=True, error="provider reported a usage limit")
     return AgentResult(True, text=proc.stdout or "")

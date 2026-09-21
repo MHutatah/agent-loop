@@ -128,6 +128,63 @@ def test_a_missing_cli_is_still_a_result_not_a_raise():
     assert "not found" in res.error
 
 
+def test_the_reported_reason_is_the_reason_and_not_the_banner():
+    """codex writes a banner to stderr on every run, successful or not.
+
+    With `stderr[:400]` that banner WAS the error message, so a day of failed
+    consultations all read "second voice unavailable: Reading additional input
+    from stdin..." and the real cause, an unreachable model, was truncated off
+    the end. Observed stderr, reproduced from the box.
+    """
+    from agentloop.runner import _why
+    observed = (
+        "Reading additional input from stdin...\n"
+        "OpenAI Codex v0.145.0\n"
+        "--------\n"
+        "workdir: /home/ubuntu/agent-loop-work/repos/x/trees/issue-139\n"
+        "model: astra\n"
+        "provider: openai\n"
+        "approval: never\n"
+        "sandbox: read-only\n"
+        "reasoning effort: none\n"
+        "session id: 01a0c660-e949-7bc2-9461-ddcc972ed51e\n"
+        "--------\n"
+        "ERROR: The 'astra' model is not supported when using Codex with a "
+        "ChatGPT account.\n"
+    )
+    why = _why(observed)
+    assert "astra" in why and "not supported" in why, why
+    assert "stdin" not in why, why
+    assert "session id" not in why, why
+
+
+def test_invoke_reports_the_reason_through_the_whole_path():
+    """The _why test above passes with the call site reverted, so drive invoke.
+
+    A child that prints codex's banner, then the real reason, then fails.
+    """
+    child = (
+        "import sys;"
+        "sys.stderr.write('Reading additional input from stdin...\\n');"
+        "sys.stderr.write('OpenAI Codex v0.145.0\\n--------\\n');"
+        "sys.stderr.write('model: astra\\n--------\\n');"
+        "sys.stderr.write(\"ERROR: the 'astra' model is not supported.\\n\");"
+        "sys.exit(3)"
+    )
+    res = invoke([sys.executable, "-c", child], "prompt")
+    assert not res.ok
+    assert "not supported" in res.error, res.error
+    assert "stdin" not in res.error, res.error
+
+
+def test_an_empty_stderr_still_says_something():
+    from agentloop.runner import _why
+    assert _why("") == "non-zero exit"
+    assert _why(None) == "non-zero exit"
+    # A banner and nothing else is not a reason either.
+    assert _why("OpenAI Codex v0.145.0\n--------\n") == "non-zero exit"
+
+
 # ── the guard in the watchers, which is the part that saves the window ───────
 #
 # The tests above call cooldown.py directly, so they all pass with the call

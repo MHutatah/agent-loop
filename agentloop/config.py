@@ -61,15 +61,25 @@ IMPLEMENTER = (os.environ.get("AGENTLOOP_IMPLEMENTER", "").split()
 # expensive, and deliberately a different family from the judge so it is
 # actually a second perspective rather than the same model agreeing with itself.
 #
-# `astra` is the intended model and it is NOT reachable on this box: codex is
+# `astra` WAS the default and is NOT reachable on this box: codex is
 # authenticated with a ChatGPT account, and the API answers
 #   "The 'astra' model is not supported when using Codex with a ChatGPT account."
-# It needs an OpenAI API key. The name is kept as the default so that adding one
-# switches this on with no code change; until then a consultation simply fails,
-# and a failed consultation is silent by design — see second_voice.consult.
-# Models the ChatGPT account can reach today: gpt-5.6-sol (default), -luna,
+# It needs an OpenAI API key.
+#
+# Keeping it as the default was meant to mean "adding a key switches this on
+# with no code change". What it actually meant was that the pr watcher shelled
+# out to codex on every critical PR, every five minutes, and every one of those
+# calls failed: `second voice unavailable: Reading additional input from
+# stdin...`, which is codex's stderr and not the real reason. A consultation
+# that can never succeed is not a silent fallback, it is a subprocess and two
+# minutes of tick time bought for nothing, and it hid the real setting behind a
+# message about stdin.
+#
+# So the default is now a model this account can actually reach. Set
+# AGENTLOOP_SECOND_VOICE_MODEL=astra once an OpenAI API key is in place.
+# Reachable on the ChatGPT account: gpt-5.6-sol (codex's own default), -luna,
 # -terra, gpt-5.5.
-SECOND_VOICE_MODEL = os.environ.get("AGENTLOOP_SECOND_VOICE_MODEL", "astra")
+SECOND_VOICE_MODEL = os.environ.get("AGENTLOOP_SECOND_VOICE_MODEL", "gpt-5.6-sol")
 SECOND_VOICE = (os.environ.get("AGENTLOOP_SECOND_VOICE", "").split()
                 or ["codex", "exec", "--sandbox", "read-only",
                     "--skip-git-repo-check", "-m", SECOND_VOICE_MODEL])

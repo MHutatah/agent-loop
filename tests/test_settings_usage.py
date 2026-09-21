@@ -25,8 +25,24 @@ def test_defaults_are_conservative(st):
     # interactive work. On Max the budget exists to stop a crash loop, not to
     # ration reviews, and a cap that small silently held pull requests.
     assert st.max_judge_calls == 400
-    assert st.max_concurrent_agents == 2
     assert st.max_attempts_per_issue == 3
+
+
+def test_one_builder_is_the_default(st):
+    """Standing instruction, and the expensive default to get wrong.
+
+    Four concurrent builders drained a fresh five-hour window in about forty
+    minutes and left the loop idle for the remaining four and a half, because
+    the window is rolling from the first message rather than a nightly reset.
+    Raising this is a deliberate act with a decision tree behind it, not a
+    default: see docs/CONCURRENCY.md.
+    """
+    assert st.max_concurrent_agents == 1
+    assert st.max_concurrent_per_repo == 1
+    # And the floor stays 1, so nothing can be tuned down to a loop that
+    # never starts anything: that failure is indistinguishable from idle.
+    assert BOUNDS["max_concurrent_agents"][0] == 1
+    assert BOUNDS["max_concurrent_per_repo"][0] == 1
 
 
 def test_adjust_persists(st, tmp_path):

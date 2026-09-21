@@ -29,6 +29,7 @@ from agentloop.config import (
     Repo,
     touches_guarded_path,
 )
+from agentloop.cooldown import blocked_until, note_limit
 from agentloop.gate import decide
 from agentloop.judge import Verdict, judge_pr
 from agentloop.runner import invoke, looks_limited
@@ -125,6 +126,17 @@ def issue_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
 
     out += _collect_finished(cfg, repo, ws)
     out += _reap(cfg, repo, ws)
+
+    # STARTING IS WHAT A LIMIT FORBIDS, and only starting. The two passes above
+    # spend no tokens and free state that a limit makes more valuable, so they
+    # run first and unconditionally; everything below this line spawns an agent
+    # or labels work for one, and a spawn into an exhausted window costs a full
+    # prompt prefix before the agent reads the refusal. See cooldown.py for the
+    # measurement that made this necessary.
+    held = blocked_until(workspace_root)
+    if held:
+        out.append(f"usage limit until {held:%Y-%m-%d %H:%M} UTC — starting nothing")
+        return out
 
     # AN ISSUE THAT ALREADY HAS AN OPEN PR IS NOT WAITING TO BE STARTED, and the
     # labels cannot be trusted to say so within one tick. GitHub's issue-list
@@ -383,7 +395,12 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
             # tick retries it, rather than burning an attempt or calling for help.
             if looks_limited(text):
                 _release(repo, ws, n)
-                out.append(f"#{n} agent hit a usage limit — will retry later")
+                # "Later" used to mean the next tick, ten minutes away, into a
+                # limit with hours left on it. The notice names the reset, so
+                # record it and hold every repo until then.
+                until = note_limit(ws.shared, text)
+                out.append(f"#{n} agent hit a usage limit — held until "
+                           f"{until:%Y-%m-%d %H:%M} UTC")
             else:
                 _release(repo, ws, n,
                          reason=f"The agent exited with code {rc}. Last output:\n\n"
@@ -512,6 +529,13 @@ def pr_watcher(cfg: Config, repo: Repo, workspace_root: str) -> list[str]:
     budget = Budget(Path(workspace_root) / "judge-budget.json",
                     cfg.max_judge_calls, cfg.judge_window_hours)
 
+    # Every branch below this spends: the judge reads the diff and the files
+    # around it, the fixer is a whole agent. Unlike the issue watcher there is
+    # no token-free collection pass to protect, so the gate is the first thing.
+    held = blocked_until(workspace_root)
+    if held:
+        return [f"usage limit until {held:%Y-%m-%d %H:%M} UTC — judging nothing"]
+
     for pr in gh.open_prs(repo.slug, LABEL_PR):
         try:
             out += _handle_pr(cfg, repo, ws, budget, pr)
@@ -628,7 +652,9 @@ def _handle_pr(cfg: Config, repo: Repo, ws: Workspace, budget, pr: dict) -> list
                                cwd=str(tree) if tree.exists() else None,
                                dry=cfg.dry_run)
             if verdict.limited:
-                out.append(f"PR #{num} judge rate-limited — will retry")
+                until = note_limit(ws.shared, verdict.error or "usage limit")
+                out.append(f"PR #{num} judge rate-limited — held until "
+                           f"{until:%Y-%m-%d %H:%M} UTC")
                 return out
             if not verdict.usable:
                 # A JUDGE THAT CANNOT RULE IS NOT A REJECTION. This used to fall
@@ -737,7 +763,12 @@ def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
                                f"error={res.error}", "", res.text or ""]),
                     encoding="utf-8")
         if not res.ok:
-            out.append(f"PR #{num} fixer {'limited' if res.limited else 'failed'}")
+            if res.limited:
+                until = note_limit(ws.shared, res.error or "usage limit")
+                out.append(f"PR #{num} fixer limited — held until "
+                           f"{until:%Y-%m-%d %H:%M} UTC")
+                return
+            out.append(f"PR #{num} fixer failed")
             return
         if not cfg.dry_run and ws.has_changes(path):
             ws.commit_all(path, f"Address review on #{num}")

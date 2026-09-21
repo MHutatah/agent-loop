@@ -70,7 +70,15 @@ def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
         # a `claude -p` call inherited a shell heredoc and treated the remaining
         # script lines as instructions. An agent must only ever see the prompt
         # we hand it.
-        proc = subprocess.run([*cmd, prompt], capture_output=True, text=True,
+        # NUL BYTES OUT, because a prompt carrying one cannot be exec'd at all.
+        # A diff of a binary fixture embeds them, and `subprocess.run` raises
+        # ValueError from _fork_exec before the CLI starts. PR #140 of
+        # ipa-community adds a TIFF fixture, so every five-minute tick from
+        # 2026-09-20 raised out of invoke(), past judge_pr, and was caught by
+        # pr_watcher's per-PR handler: that one PR could never be judged, and
+        # the docstring above promised this function does not raise.
+        proc = subprocess.run([*cmd, prompt.replace("\0", "")],
+                              capture_output=True, text=True,
                               encoding="utf-8", errors="replace",
                               stdin=subprocess.DEVNULL,
                               cwd=cwd, timeout=timeout)
@@ -78,6 +86,11 @@ def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
         return AgentResult(False, error=f"CLI not found: {cmd[0]!r} — is it installed?")
     except subprocess.TimeoutExpired:
         return AgentResult(False, error=f"timed out after {timeout}s")
+    except (ValueError, OSError) as exc:
+        # The remaining ways a process fails to start: an argument the kernel
+        # rejects, or no capacity to fork. Both are failures of this call and
+        # not of the loop, and "never raises" has to mean it.
+        return AgentResult(False, error=f"could not start {cmd[0]!r}: {exc}")
 
     combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
     if proc.returncode != 0:

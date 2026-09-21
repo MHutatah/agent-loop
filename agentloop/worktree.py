@@ -52,6 +52,10 @@ class Workspace:
     def __init__(self, root: str | Path, repo_slug: str):
         self.repo_slug = repo_slug
         self.key = repo_key(repo_slug)
+        # `shared` is the workspace every repo has in common, and is where
+        # account-wide state belongs: one subscription funds all of them, so a
+        # usage limit seen here has to stop the others too. See cooldown.py.
+        self.shared = Path(root)
         # `root` stays the shared workspace; everything below it is per-repo.
         self.root = Path(root) / "repos" / self.key
         self.clone = self.root / "repo"

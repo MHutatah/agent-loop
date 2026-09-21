@@ -371,7 +371,14 @@ class Workspace:
         git(["push", "-u", "origin", branch, "--force-with-lease"], path)
 
     def active(self) -> list[int]:
-        """Issue numbers with a live worktree — used to cap concurrency."""
+        """Issue numbers that still have a worktree DIRECTORY on disk.
+
+        NOT a concurrency signal, whatever the old name suggests: a tree
+        outlives its agent until the reaper takes it, so this counts history
+        as well as work in progress. Concurrency is capped on
+        tmux.live_windows(), which counts processes. `agentloop status` read
+        this one and reported "agents live: 47/1" with nothing running.
+        """
         if not self.trees.exists():
             return []
         out = []

@@ -137,8 +137,12 @@ class Repo:
 class Config:
     repos: list[Repo] = field(default_factory=list)
 
-    # Concurrency: two is a sane default for a small VPS that runs other things.
-    max_concurrent_agents: int = 2
+    # Concurrency: ONE. Settings.load() overrides this at runtime, so the value
+    # here only shows up when a Config is built directly, and it matching the
+    # settings default is the point: two defaults that disagree is how a test
+    # passes against a number production never uses. Why one, and when to raise
+    # it: settings.py and docs/CONCURRENCY.md.
+    max_concurrent_agents: int = 1
 
     # And a per-repository ceiling. Capacity used to be global only, and the
     # scheduler walked `cfg.repos` in order handing every free slot to whoever

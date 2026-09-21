@@ -15,9 +15,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agentloop import gh
+from agentloop import gh, tmux
 from agentloop.budget import Budget
 from agentloop.config import CONTROL_LABELS, LABEL_PR, LABEL_READY, Config
+from agentloop.cooldown import blocked_until
 from agentloop.watchers import issue_watcher, pr_watcher
 from agentloop.worktree import Workspace, git
 
@@ -97,14 +98,33 @@ def status(cfg: Config) -> int:
         ws = Workspace(WORKSPACE, repo.slug)
         ready = gh.ready_issues(repo.slug, LABEL_READY, "agent:working", "agent:stop")
         prs = gh.open_prs(repo.slug, LABEL_PR)
+        # LIVE MEANS RUNNING, and this line used to read ws.active(), which is
+        # worktree directories on disk. Those outlive their agents by design,
+        # so with 47 trees and nothing running at all it printed
+        # "agents live: 47/1" — a loop reported as jammed at capacity when it
+        # was simply idle. issue_watcher has always counted tmux windows; this
+        # now counts the same thing, and the trees get their own line because
+        # they are a disk signal, not a concurrency one.
+        live = tmux.live_for(ws.key) if tmux.available() else []
+        trees = ws.active()
         print(f"\n{repo.slug}")
         print(f"  ready issues : {len(ready)}  {[i['number'] for i in ready]}")
-        print(f"  agents live  : {len(ws.active())}/{cfg.max_concurrent_agents} "
-              f"{ws.active()}")
+        print(f"  agents live  : {len(live)}/{cfg.max_concurrent_agents}  {live}")
         print(f"  open agent PRs: {len(prs)}  {[p['number'] for p in prs]}")
+        stale = len(trees) - len(live)
+        if stale > 0:
+            print(f"  worktrees     : {len(trees)} on disk, {stale} with no agent "
+                  f"(disk only, not a cap: see agent-loop#15)")
     b = Budget(Path(WORKSPACE) / "judge-budget.json",
                cfg.max_judge_calls, cfg.judge_window_hours)
     print(f"\njudge budget : {b.status()}")
+    held = blocked_until(WORKSPACE)
+    if held:
+        print(f"usage limit  : HELD until {held:%Y-%m-%d %H:%M} UTC, "
+              f"nothing starts before then")
+    else:
+        print(f"usage limit  : clear, {cfg.max_concurrent_agents} builder(s) "
+              f"— raise it only per docs/CONCURRENCY.md")
     return 0
 
 

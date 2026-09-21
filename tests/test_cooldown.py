@@ -180,3 +180,43 @@ def test_an_expired_hold_lets_the_loop_run_again(tmp_path):
     with patch("agentloop.gh.open_prs", return_value=[]) as listed:
         pr_watcher(cfg, cfg.repos[0], tmp_path)
     assert listed.called, "an expired hold must not keep the loop stopped"
+
+
+# ── status has to tell the truth, because the advice is read off it ──────────
+
+def test_status_counts_running_agents_not_worktrees(tmp_path, capsys, monkeypatch):
+    """`agents live` read worktree directories, which outlive their agents.
+
+    On the box that printed "agents live: 47/1" while tmux held two windows,
+    neither an agent: a loop reported as jammed at its cap when it was idle.
+    Anyone reading that number to decide concurrency decides the opposite of
+    what they should.
+    """
+    from agentloop import cli
+
+    monkeypatch.setattr(cli, "WORKSPACE", str(tmp_path))
+    trees = tmp_path / "repos" / "o__r" / "trees"
+    trees.mkdir(parents=True)
+    for n in (11, 12, 13, 14):            # four trees left on disk
+        (trees / f"issue-{n}").mkdir()
+
+    cfg = Config(repos=[Repo(slug="o/r")])
+    with patch("agentloop.gh.ready_issues", return_value=[]), \
+         patch("agentloop.gh.open_prs", return_value=[]), \
+         patch("agentloop.tmux.available", return_value=True), \
+         patch("agentloop.tmux.live_for", return_value=[12]):   # one is running
+        cli.status(cfg)
+
+    printed = capsys.readouterr().out
+    assert "agents live  : 1/" in printed, printed
+    assert "4 on disk, 3 with no agent" in printed, printed
+
+
+def test_status_says_when_a_hold_is_in_force(tmp_path, capsys, monkeypatch):
+    from agentloop import cli
+
+    monkeypatch.setattr(cli, "WORKSPACE", str(tmp_path))
+    note_limit(tmp_path, "resets 4am (UTC)")
+    cfg = Config(repos=[])
+    cli.status(cfg)
+    assert "HELD until" in capsys.readouterr().out

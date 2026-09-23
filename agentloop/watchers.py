@@ -33,7 +33,7 @@ from agentloop.cooldown import blocked_until, note_limit
 from agentloop.gate import decide
 from agentloop.judge import Verdict, judge_pr
 from agentloop.runner import invoke, looks_limited
-from agentloop.worktree import Workspace, branch_name
+from agentloop.worktree import Workspace, branch_name, git
 
 log = logging.getLogger("agentloop.watchers")
 
@@ -424,6 +424,19 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
             out.append(f"#{n} no changes produced")
             continue
 
+        # ADOPT BEFORE ANY ESCALATION CAN RETURN. gh.py states the invariant
+        # this protects: pr_watcher only looks at PRs carrying LABEL_PR, so an
+        # unlabelled PR is never judged and never merges. That guarantee only
+        # ever covered PRs the loop itself opened. An agent that opens its own
+        # pull request is adopted further down, after the guard below, and the
+        # guard's `continue` skips it: ipa-community #150 was MERGEABLE and
+        # CLEAN and invisible to the judge for two days for exactly that
+        # reason. The refusal below is about pushing, and says nothing about a
+        # pull request already on GitHub.
+        if not cfg.dry_run:
+            with contextlib.suppress(Exception):
+                _adopt_open_pr(repo, n)
+
         # CONTAINMENT BEFORE THE PUSH, not at merge time. gate.py checks guarded
         # paths when deciding whether to merge, which is too late to matter: the
         # branch is on GitHub by then. If the agent wrote a credential while
@@ -448,13 +461,11 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
                 ws.commit_all(path, f"{title}\n\nCloses #{n}\n\n"
                                     f"Implemented by Codex via agent-loop.")
             ws.push(path, branch)          # force-with-lease: safe to repeat
-            existing = gh.pr_for_branch(repo.slug, branch)
-            if existing:
+            adopted = _adopt_open_pr(repo, n)
+            if adopted:
                 # A previous tick pushed and then failed to finish. Adopt its PR
                 # instead of failing forever on "a pull request already exists".
-                if LABEL_PR not in {lbl["name"] for lbl in existing.get("labels", [])}:
-                    gh.add_label(repo.slug, existing["number"], LABEL_PR)
-                out.append(f"#{n} PR #{existing['number']} already open — adopted")
+                out.append(f"#{n} PR #{adopted} already open — adopted")
             else:
                 gh.create_pr(repo.slug, head=branch, title=title,
                              body=(f"Closes #{n}\n\nImplemented autonomously by "
@@ -479,6 +490,27 @@ def _collect_finished(cfg: Config, repo: Repo, ws: Workspace) -> list[str]:
             log.exception("collecting issue #%s failed", n)
             out.append(f"#{n} collect error: {exc}")
     return out
+
+
+def _adopt_open_pr(repo: Repo, n: int) -> int | None:
+    """Put LABEL_PR on an already-open pull request for issue `n`.
+
+    One place, because every escalation path that returns early is a path that
+    can otherwise leave a pull request open and unlabelled, and gh.py's
+    invariant is that an unlabelled PR is never judged and never merges. A
+    guard in the one function every caller routes through beats remembering it
+    at each `continue`.
+
+    Returns the PR number if there was one, so a caller can say so.
+    """
+    title = gh.run(["issue", "view", str(n), "--repo", repo.slug,
+                    "--json", "title", "--jq", ".title"])
+    existing = gh.pr_for_branch(repo.slug, branch_name(n, title))
+    if not existing:
+        return None
+    if LABEL_PR not in {lbl["name"] for lbl in existing.get("labels", [])}:
+        gh.add_label(repo.slug, existing["number"], LABEL_PR)
+    return int(existing["number"])
 
 
 def _release(repo: Repo, ws: Workspace, n: int, reason: str | None = None,
@@ -738,13 +770,19 @@ def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
         return
     try:
         path = ws.trees / f"issue-{num}"
-        if not cfg.dry_run and not path.exists():
+        if not cfg.dry_run:
             ws.ensure_clone()
             # attach(), never create(): create() resets the branch to the base.
+            # UNCONDITIONALLY, not only when the directory is missing. Trees
+            # outlive their agents by design, so after the first run the
+            # directory always exists and the old guard skipped both things
+            # attach() is for: fetching the PR's own branch, and rebuilding a
+            # tree left checked out on the wrong one. A fixer working in a
+            # stale or wrong-branch tree commits somewhere nobody pushes.
+            # attach() returns immediately when the tree is already correct.
             path = ws.attach(num, pr["headRefName"])
         # Make origin/<base> present in the worktree so the agent can rebase.
         if not cfg.dry_run:
-            from agentloop.worktree import git
             git(["fetch", "origin", repo.default_branch], path, check=False)
         prompt = FIX_PROMPT.format(number=num, title=issue["title"],
                                    body=issue["body"][:4000],
@@ -770,8 +808,26 @@ def _run_fixer(cfg, repo, ws, num, pr, issue, problems, out) -> None:
                 return
             out.append(f"PR #{num} fixer failed")
             return
-        if not cfg.dry_run and ws.has_changes(path):
-            ws.commit_all(path, f"Address review on #{num}")
+        # ONLY CLAIM A FIX THAT MOVED THE BRANCH. `res.ok` means the CLI exited
+        # 0, nothing more: a session that reads the review, decides the points
+        # are already addressed and edits nothing exits 0 too. And
+        # has_changes() answers "is the tree dirty", which is false when the
+        # agent committed by itself, so the push was skipped and the comment
+        # went out anyway. ipa-community #151 carries two "Addressed the points
+        # above" comments, 2026-09-21 and 2026-09-23, on a branch whose head
+        # has not moved since 2026-09-21.
+        #
+        # That comment is also the attempt counter, so each empty claim spends
+        # one of max_attempts_per_issue and the third labels a pull request
+        # agent:needs-human for three fixes that were never attempted.
+        if not cfg.dry_run:
+            before = git(["rev-parse", "HEAD"], path, check=False)
+            if ws.has_changes(path):
+                ws.commit_all(path, f"Address review on #{num}")
+            if git(["rev-parse", "HEAD"], path, check=False) == before \
+                    and ws.ahead_of(path, repo.default_branch) == 0:
+                out.append(f"PR #{num} fixer changed nothing — not claiming a fix")
+                return
             ws.push(path, pr["headRefName"], base=repo.default_branch)
         gh.comment(repo.slug, num,
                    "Addressed the points above. <!-- agent-loop:attempt --> " + MARKER,

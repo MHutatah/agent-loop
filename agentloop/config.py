@@ -233,6 +233,20 @@ def _load_repos() -> list[Repo]:
 
 
 def touches_guarded_path(files: list[str], cfg: Config) -> list[str]:
-    """Which changed files fall under a guarded path (blocks auto-merge)."""
+    """Which changed files fall under a guarded path (blocks auto-merge).
+
+    A BARE PREFIX MATCH IS THE WRONG TEST, and it cost a pull request. `.env`
+    is in the list as a file, and `f.startswith(".env")` also matches
+    `.env.example`, which is a committed template with no secret in it. The
+    collection of ipa-community #23 was refused on that basis on 2026-09-21,
+    and because the refusal returns before the adopt step, its pull request
+    #150 sat open and unlabelled, and therefore invisible to the judge, for
+    two days.
+
+    So: an entry ending in `/` is a directory prefix and still matches that
+    way. An entry without one is a file, and matches itself or something
+    beneath it, never a sibling that merely starts with the same letters.
+    """
     return [f for f in files
-            if any(f == g or f.startswith(g) for g in cfg.guarded_paths)]
+            if any(f == g or f.startswith(g if g.endswith("/") else g + "/")
+                   for g in cfg.guarded_paths)]

@@ -35,7 +35,7 @@ MARKER = "<!-- agent-loop -->"
 # but nothing outside it. (`--full-auto` is the deprecated spelling.) Codex also
 # refuses to run outside a git repo unless told otherwise — our worktrees are
 # repos, so that check is a useful backstop and is left on.
-# THE IMPLEMENTER IS CLAUDE CODE, on Opus 5.
+# THE IMPLEMENTER IS CLAUDE CODE, on Opus 5.5.
 #
 # WHAT THIS GAVE UP, stated plainly because it is not recoverable by reading the
 # diff: codex ran under `--sandbox workspace-write`, which confines it to its
@@ -52,7 +52,7 @@ MARKER = "<!-- agent-loop -->"
 # What it bought: a stronger model, and the ability to rebase. codex could not,
 # because its sandbox mounts .git read-only, which is why a conflicting pull
 # request had no route out.
-IMPLEMENTER_MODEL = os.environ.get("AGENTLOOP_IMPLEMENTER_MODEL", "claude-opus-5")
+IMPLEMENTER_MODEL = os.environ.get("AGENTLOOP_IMPLEMENTER_MODEL", "claude-opus-5-5")
 IMPLEMENTER = (os.environ.get("AGENTLOOP_IMPLEMENTER", "").split()
                or ["claude", "-p", "--dangerously-skip-permissions",
                    "--model", IMPLEMENTER_MODEL])
@@ -84,7 +84,7 @@ SECOND_VOICE = (os.environ.get("AGENTLOOP_SECOND_VOICE", "").split()
                 or ["codex", "exec", "--sandbox", "read-only",
                     "--skip-git-repo-check", "-m", SECOND_VOICE_MODEL])
 
-# THE JUDGE RUNS ON OPUS 5, the current most capable Opus-tier model.
+# THE JUDGE RUNS ON OPUS 5.5, the current Opus-tier model.
 #
 # It used to be Sonnet, chosen when the loop shared a Pro plan with interactive
 # work and the quota difference per review decided whether the day got a handful
@@ -96,7 +96,7 @@ SECOND_VOICE = (os.environ.get("AGENTLOOP_SECOND_VOICE", "").split()
 # Exact model IDs only, never a date-suffixed variant. "opus"/"sonnet" bare
 # aliases resolve to whatever the CLI decides is current, which is precisely the
 # ambiguity worth removing from a file that gates merges.
-JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "claude-opus-5")
+JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "claude-opus-5-5")
 # READ-ONLY TOOLS, and a working directory, because a diff is not enough.
 #
 # The judge's own docstring promised to decide whether "an acceptance criterion

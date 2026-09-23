@@ -122,3 +122,26 @@ def test_codex_usage_parses_a_rollout(tmp_path, monkeypatch):
     assert u.primary.used_percent == 17.0
     assert u.primary.label == "weekly"
     assert u.total_tokens == 470086
+
+
+def test_every_claude_agent_runs_the_same_pinned_opus():
+    """Exact ids, never a bare alias: config.py argues this for the judge, and
+    the same reasoning covers the implementer and the overseer window. A bare
+    "opus" resolves to whatever the CLI calls current, which is the ambiguity
+    worth removing from the file that gates merges.
+    """
+    import re
+    from pathlib import Path
+
+    from agentloop.config import IMPLEMENTER, IMPLEMENTER_MODEL, JUDGE, JUDGE_MODEL
+
+    assert IMPLEMENTER_MODEL == "claude-opus-5-5"
+    assert JUDGE_MODEL == "claude-opus-5-5"
+    # The flag actually handed to the CLI, not just the constant beside it.
+    assert IMPLEMENTER[IMPLEMENTER.index("--model") + 1] == "claude-opus-5-5"
+    assert JUDGE[JUDGE.index("--model") + 1] == "claude-opus-5-5"
+
+    start = Path(__file__).resolve().parents[1] / "deploy" / "overseer" / "start.sh"
+    line = next(ln for ln in start.read_text(encoding="utf-8").splitlines()
+                if re.match(r"\s*claude ", ln))
+    assert "--model claude-opus-5-5" in line, line

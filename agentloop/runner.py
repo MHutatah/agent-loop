@@ -72,16 +72,31 @@ _NOISE = re.compile(
 )
 
 
-def _why(stderr: str | None) -> str:
-    """The useful part of a failed run's stderr.
+# Lines that announce a reason. codex echoes the PROMPT as well as the banner,
+# and a review prompt ends in a JSON schema, so "drop the banner and keep the
+# tail" made the schema the error message: every limited consultation on
+# 2026-09-23 was logged as
+#   second voice unavailable: nce", "points": ["specific", ...]}
+# with the actual notice, a usage limit with a reset time, nowhere in it. The
+# banner fix was right that the head is not the reason; it was wrong that
+# position identifies it at all. Match the marker, and fall back to the tail
+# only when nothing in the output announces itself.
+_REASON = re.compile(r"^\s*(\w+\s+)?(error|fatal|panic|exception)\b\s*:?", re.I)
 
-    Drops the known banner lines, then keeps the TAIL rather than the head:
-    a CLI prints its preamble first and its reason last, so the end of stderr
-    is where the answer is.
+
+def _why(output: str | None) -> str:
+    """The useful part of a failed run's output.
+
+    Takes stdout AND stderr, because the two CLIs disagree about where a
+    reason goes and looks_limited already reads both: a function that decides
+    the run was limited from one text while the reason is read from another is
+    how a limit notice gets reported as a fragment of its own prompt.
     """
-    lines = [ln for ln in (stderr or "").splitlines()
+    lines = [ln for ln in (output or "").splitlines()
              if ln.strip() and not _NOISE.match(ln)]
-    return "\n".join(lines)[-400:].strip() or "non-zero exit"
+    stated = [ln for ln in lines
+              if _REASON.match(ln) or _LIMIT_PATTERNS.search(ln)]
+    return "\n".join(stated or lines)[-400:].strip() or "non-zero exit"
 
 
 def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
@@ -122,7 +137,7 @@ def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
     combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
     if proc.returncode != 0:
         return AgentResult(False, limited=looks_limited(combined),
-                           error=_why(proc.stderr))
+                           error=_why(combined))
     if not (proc.stdout or "").strip() and looks_limited(combined):
         return AgentResult(False, limited=True, error="provider reported a usage limit")
     return AgentResult(True, text=proc.stdout or "")

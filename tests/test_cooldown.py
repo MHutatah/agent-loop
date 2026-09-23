@@ -177,6 +177,47 @@ def test_invoke_reports_the_reason_through_the_whole_path():
     assert "stdin" not in res.error, res.error
 
 
+def test_the_reason_beats_the_prompt_codex_echoes_around_it():
+    """codex echoes the PROMPT as well as its banner, and a review prompt ends
+    in a JSON schema, so keeping the tail reported the schema. Every limited
+    consultation on 2026-09-23 read `second voice unavailable: nce", "points":
+    ["specific", ...]}` while the notice itself, with its reset time, was
+    dropped. Reproduced from the line the box actually logged.
+    """
+    from agentloop.runner import _why
+    observed = (
+        "OpenAI Codex v0.145.0\n"
+        "--------\n"
+        "ERROR: You've hit your usage limit. Try again at 6:58 AM.\n"
+        "--------\n"
+        "user\n"
+        'Review this PR and answer {"verdict": "...", "confidence", '
+        '"points": ["specific", ...]}\n'
+    )
+    why = _why(observed)
+    assert "usage limit" in why and "6:58" in why, why
+    assert "points" not in why, why
+
+
+def test_invoke_finds_a_reason_that_arrived_on_stdout():
+    """looks_limited reads stdout and stderr together; _why was handed stderr
+    alone. A CLI that prints its notice on stdout therefore set limited=True
+    and reported, as the reason, whatever happened to end stderr.
+    """
+    child = (
+        "import sys;"
+        "sys.stdout.write('ERROR: You have hit your usage limit. "
+        "Try again at 6:58 AM.\\n');"
+        "sys.stderr.write('OpenAI Codex v0.145.0\\n--------\\nuser\\n');"
+        "sys.stderr.write('\\\"points\\\": [\\\"specific\\\", ...]}\\n');"
+        "sys.exit(1)"
+    )
+    res = invoke([sys.executable, "-c", child], "prompt")
+    assert not res.ok and res.limited
+    assert "usage limit" in res.error, res.error
+    assert "points" not in res.error, res.error
+
+
 def test_an_empty_stderr_still_says_something():
     from agentloop.runner import _why
     assert _why("") == "non-zero exit"

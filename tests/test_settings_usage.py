@@ -25,8 +25,24 @@ def test_defaults_are_conservative(st):
     # interactive work. On Max the budget exists to stop a crash loop, not to
     # ration reviews, and a cap that small silently held pull requests.
     assert st.max_judge_calls == 400
-    assert st.max_concurrent_agents == 2
     assert st.max_attempts_per_issue == 3
+
+
+def test_one_builder_is_the_default(st):
+    """Standing instruction, and the expensive default to get wrong.
+
+    Four concurrent builders drained a fresh five-hour window in about forty
+    minutes and left the loop idle for the remaining four and a half, because
+    the window is rolling from the first message rather than a nightly reset.
+    Raising this is a deliberate act with a decision tree behind it, not a
+    default: see docs/CONCURRENCY.md.
+    """
+    assert st.max_concurrent_agents == 1
+    assert st.max_concurrent_per_repo == 1
+    # And the floor stays 1, so nothing can be tuned down to a loop that
+    # never starts anything: that failure is indistinguishable from idle.
+    assert BOUNDS["max_concurrent_agents"][0] == 1
+    assert BOUNDS["max_concurrent_per_repo"][0] == 1
 
 
 def test_adjust_persists(st, tmp_path):
@@ -106,3 +122,26 @@ def test_codex_usage_parses_a_rollout(tmp_path, monkeypatch):
     assert u.primary.used_percent == 17.0
     assert u.primary.label == "weekly"
     assert u.total_tokens == 470086
+
+
+def test_every_claude_agent_runs_the_same_pinned_opus():
+    """Exact ids, never a bare alias: config.py argues this for the judge, and
+    the same reasoning covers the implementer and the overseer window. A bare
+    "opus" resolves to whatever the CLI calls current, which is the ambiguity
+    worth removing from the file that gates merges.
+    """
+    import re
+    from pathlib import Path
+
+    from agentloop.config import IMPLEMENTER, IMPLEMENTER_MODEL, JUDGE, JUDGE_MODEL
+
+    assert IMPLEMENTER_MODEL == "claude-opus-5-5"
+    assert JUDGE_MODEL == "claude-opus-5-5"
+    # The flag actually handed to the CLI, not just the constant beside it.
+    assert IMPLEMENTER[IMPLEMENTER.index("--model") + 1] == "claude-opus-5-5"
+    assert JUDGE[JUDGE.index("--model") + 1] == "claude-opus-5-5"
+
+    start = Path(__file__).resolve().parents[1] / "deploy" / "overseer" / "start.sh"
+    line = next(ln for ln in start.read_text(encoding="utf-8").splitlines()
+                if re.match(r"\s*claude ", ln))
+    assert "--model claude-opus-5-5" in line, line

@@ -35,7 +35,7 @@ MARKER = "<!-- agent-loop -->"
 # but nothing outside it. (`--full-auto` is the deprecated spelling.) Codex also
 # refuses to run outside a git repo unless told otherwise — our worktrees are
 # repos, so that check is a useful backstop and is left on.
-# THE IMPLEMENTER IS CLAUDE CODE, on Opus 5.
+# THE IMPLEMENTER IS CLAUDE CODE, on Opus 5.5.
 #
 # WHAT THIS GAVE UP, stated plainly because it is not recoverable by reading the
 # diff: codex ran under `--sandbox workspace-write`, which confines it to its
@@ -52,7 +52,7 @@ MARKER = "<!-- agent-loop -->"
 # What it bought: a stronger model, and the ability to rebase. codex could not,
 # because its sandbox mounts .git read-only, which is why a conflicting pull
 # request had no route out.
-IMPLEMENTER_MODEL = os.environ.get("AGENTLOOP_IMPLEMENTER_MODEL", "claude-opus-5")
+IMPLEMENTER_MODEL = os.environ.get("AGENTLOOP_IMPLEMENTER_MODEL", "claude-opus-5-5")
 IMPLEMENTER = (os.environ.get("AGENTLOOP_IMPLEMENTER", "").split()
                or ["claude", "-p", "--dangerously-skip-permissions",
                    "--model", IMPLEMENTER_MODEL])
@@ -61,20 +61,30 @@ IMPLEMENTER = (os.environ.get("AGENTLOOP_IMPLEMENTER", "").split()
 # expensive, and deliberately a different family from the judge so it is
 # actually a second perspective rather than the same model agreeing with itself.
 #
-# `astra` is the intended model and it is NOT reachable on this box: codex is
+# `astra` WAS the default and is NOT reachable on this box: codex is
 # authenticated with a ChatGPT account, and the API answers
 #   "The 'astra' model is not supported when using Codex with a ChatGPT account."
-# It needs an OpenAI API key. The name is kept as the default so that adding one
-# switches this on with no code change; until then a consultation simply fails,
-# and a failed consultation is silent by design — see second_voice.consult.
-# Models the ChatGPT account can reach today: gpt-5.6-sol (default), -luna,
+# It needs an OpenAI API key.
+#
+# Keeping it as the default was meant to mean "adding a key switches this on
+# with no code change". What it actually meant was that the pr watcher shelled
+# out to codex on every critical PR, every five minutes, and every one of those
+# calls failed: `second voice unavailable: Reading additional input from
+# stdin...`, which is codex's stderr and not the real reason. A consultation
+# that can never succeed is not a silent fallback, it is a subprocess and two
+# minutes of tick time bought for nothing, and it hid the real setting behind a
+# message about stdin.
+#
+# So the default is now a model this account can actually reach. Set
+# AGENTLOOP_SECOND_VOICE_MODEL=astra once an OpenAI API key is in place.
+# Reachable on the ChatGPT account: gpt-5.6-sol (codex's own default), -luna,
 # -terra, gpt-5.5.
-SECOND_VOICE_MODEL = os.environ.get("AGENTLOOP_SECOND_VOICE_MODEL", "astra")
+SECOND_VOICE_MODEL = os.environ.get("AGENTLOOP_SECOND_VOICE_MODEL", "gpt-5.6-sol")
 SECOND_VOICE = (os.environ.get("AGENTLOOP_SECOND_VOICE", "").split()
                 or ["codex", "exec", "--sandbox", "read-only",
                     "--skip-git-repo-check", "-m", SECOND_VOICE_MODEL])
 
-# THE JUDGE RUNS ON OPUS 5, the current most capable Opus-tier model.
+# THE JUDGE RUNS ON OPUS 5.5, the current Opus-tier model.
 #
 # It used to be Sonnet, chosen when the loop shared a Pro plan with interactive
 # work and the quota difference per review decided whether the day got a handful
@@ -86,7 +96,7 @@ SECOND_VOICE = (os.environ.get("AGENTLOOP_SECOND_VOICE", "").split()
 # Exact model IDs only, never a date-suffixed variant. "opus"/"sonnet" bare
 # aliases resolve to whatever the CLI decides is current, which is precisely the
 # ambiguity worth removing from a file that gates merges.
-JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "claude-opus-5")
+JUDGE_MODEL = os.environ.get("AGENTLOOP_JUDGE_MODEL", "claude-opus-5-5")
 # READ-ONLY TOOLS, and a working directory, because a diff is not enough.
 #
 # The judge's own docstring promised to decide whether "an acceptance criterion
@@ -127,8 +137,12 @@ class Repo:
 class Config:
     repos: list[Repo] = field(default_factory=list)
 
-    # Concurrency: two is a sane default for a small VPS that runs other things.
-    max_concurrent_agents: int = 2
+    # Concurrency: ONE. Settings.load() overrides this at runtime, so the value
+    # here only shows up when a Config is built directly, and it matching the
+    # settings default is the point: two defaults that disagree is how a test
+    # passes against a number production never uses. Why one, and when to raise
+    # it: settings.py and docs/CONCURRENCY.md.
+    max_concurrent_agents: int = 1
 
     # And a per-repository ceiling. Capacity used to be global only, and the
     # scheduler walked `cfg.repos` in order handing every free slot to whoever
@@ -219,6 +233,20 @@ def _load_repos() -> list[Repo]:
 
 
 def touches_guarded_path(files: list[str], cfg: Config) -> list[str]:
-    """Which changed files fall under a guarded path (blocks auto-merge)."""
+    """Which changed files fall under a guarded path (blocks auto-merge).
+
+    A BARE PREFIX MATCH IS THE WRONG TEST, and it cost a pull request. `.env`
+    is in the list as a file, and `f.startswith(".env")` also matches
+    `.env.example`, which is a committed template with no secret in it. The
+    collection of ipa-community #23 was refused on that basis on 2026-09-21,
+    and because the refusal returns before the adopt step, its pull request
+    #150 sat open and unlabelled, and therefore invisible to the judge, for
+    two days.
+
+    So: an entry ending in `/` is a directory prefix and still matches that
+    way. An entry without one is a file, and matches itself or something
+    beneath it, never a sibling that merely starts with the same letters.
+    """
     return [f for f in files
-            if any(f == g or f.startswith(g) for g in cfg.guarded_paths)]
+            if any(f == g or f.startswith(g if g.endswith("/") else g + "/")
+                   for g in cfg.guarded_paths)]

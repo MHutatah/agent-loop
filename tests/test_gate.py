@@ -76,6 +76,19 @@ def test_touches_guarded_path_is_prefix_aware():
     assert not touches_guarded_path(["docs/github-workflows-guide.md"], CFG)
 
 
+def test_a_guarded_file_does_not_guard_its_siblings():
+    """`.env` is guarded; `.env.example` is a committed template with nothing
+    secret in it. A bare startswith matched both, so ipa-community #23 was
+    refused before its push on 2026-09-21 and its pull request #150 sat open,
+    unlabelled and therefore unjudgeable, for two days.
+    """
+    assert touches_guarded_path([".env"], CFG)
+    assert touches_guarded_path(["secrets/key.pem"], CFG)
+    assert not touches_guarded_path([".env.example"], CFG)
+    assert not touches_guarded_path([".environment/notes.md"], CFG)
+    assert not touches_guarded_path(["deployment-notes.md"], CFG)
+
+
 def test_unreadable_ci_is_refused_and_named_distinctly():
     """A broken CI query once masqueraded as 'no CI configured', so green PRs
     were refused for a reason that wasn't true. Both still refuse — but only one

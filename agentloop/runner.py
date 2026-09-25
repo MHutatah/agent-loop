@@ -57,6 +57,48 @@ def looks_limited(text: str) -> bool:
     return bool(_LIMIT_PATTERNS.search(text or ""))
 
 
+# Lines both CLIs print on stderr whether or not anything went wrong. codex
+# writes a banner there on EVERY run, including successful ones, so the old
+# `stderr[:400]` reported the banner and truncated the actual reason off the
+# end. For a day that meant every failed consultation was logged as "second
+# voice unavailable: Reading additional input from stdin...", which sent the
+# diagnosis at the stdin handling and away from the real cause, an unreachable
+# model named four lines further down.
+_NOISE = re.compile(
+    r"^\s*(-{4,}|Reading additional input from stdin\.*|OpenAI Codex v[\d.]+|"
+    r"workdir:|model:|provider:|approval:|sandbox:|reasoning (effort|summaries):|"
+    r"session id:|tokens used)",
+    re.I,
+)
+
+
+# Lines that announce a reason. codex echoes the PROMPT as well as the banner,
+# and a review prompt ends in a JSON schema, so "drop the banner and keep the
+# tail" made the schema the error message: every limited consultation on
+# 2026-09-23 was logged as
+#   second voice unavailable: nce", "points": ["specific", ...]}
+# with the actual notice, a usage limit with a reset time, nowhere in it. The
+# banner fix was right that the head is not the reason; it was wrong that
+# position identifies it at all. Match the marker, and fall back to the tail
+# only when nothing in the output announces itself.
+_REASON = re.compile(r"^\s*(\w+\s+)?(error|fatal|panic|exception)\b\s*:?", re.I)
+
+
+def _why(output: str | None) -> str:
+    """The useful part of a failed run's output.
+
+    Takes stdout AND stderr, because the two CLIs disagree about where a
+    reason goes and looks_limited already reads both: a function that decides
+    the run was limited from one text while the reason is read from another is
+    how a limit notice gets reported as a fragment of its own prompt.
+    """
+    lines = [ln for ln in (output or "").splitlines()
+             if ln.strip() and not _NOISE.match(ln)]
+    stated = [ln for ln in lines
+              if _REASON.match(ln) or _LIMIT_PATTERNS.search(ln)]
+    return "\n".join(stated or lines)[-400:].strip() or "non-zero exit"
+
+
 def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
            timeout: int = 1800, dry: bool = False) -> AgentResult:
     """Run one agent CLI once. Never raises for CLI failure — returns ok=False."""
@@ -70,7 +112,15 @@ def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
         # a `claude -p` call inherited a shell heredoc and treated the remaining
         # script lines as instructions. An agent must only ever see the prompt
         # we hand it.
-        proc = subprocess.run([*cmd, prompt], capture_output=True, text=True,
+        # NUL BYTES OUT, because a prompt carrying one cannot be exec'd at all.
+        # A diff of a binary fixture embeds them, and `subprocess.run` raises
+        # ValueError from _fork_exec before the CLI starts. PR #140 of
+        # ipa-community adds a TIFF fixture, so every five-minute tick from
+        # 2026-09-20 raised out of invoke(), past judge_pr, and was caught by
+        # pr_watcher's per-PR handler: that one PR could never be judged, and
+        # the docstring above promised this function does not raise.
+        proc = subprocess.run([*cmd, prompt.replace("\0", "")],
+                              capture_output=True, text=True,
                               encoding="utf-8", errors="replace",
                               stdin=subprocess.DEVNULL,
                               cwd=cwd, timeout=timeout)
@@ -78,11 +128,16 @@ def invoke(cmd: list[str], prompt: str, *, cwd: str | None = None,
         return AgentResult(False, error=f"CLI not found: {cmd[0]!r} — is it installed?")
     except subprocess.TimeoutExpired:
         return AgentResult(False, error=f"timed out after {timeout}s")
+    except (ValueError, OSError) as exc:
+        # The remaining ways a process fails to start: an argument the kernel
+        # rejects, or no capacity to fork. Both are failures of this call and
+        # not of the loop, and "never raises" has to mean it.
+        return AgentResult(False, error=f"could not start {cmd[0]!r}: {exc}")
 
     combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
     if proc.returncode != 0:
         return AgentResult(False, limited=looks_limited(combined),
-                           error=(proc.stderr or "non-zero exit").strip()[:400])
+                           error=_why(combined))
     if not (proc.stdout or "").strip() and looks_limited(combined):
         return AgentResult(False, limited=True, error="provider reported a usage limit")
     return AgentResult(True, text=proc.stdout or "")

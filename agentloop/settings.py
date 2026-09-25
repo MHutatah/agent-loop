@@ -32,7 +32,24 @@ BOUNDS = {
 @dataclass
 class Settings:
     max_judge_calls: int = 400
-    max_concurrent_agents: int = 2
+    # ONE BUILDER, AND RAISED ONLY WHEN ASKED FOR. Standing instruction from
+    # Mohammed, 2026-09-22, and the measurements agree with it twice over.
+    #
+    # The window is rolling and five hours long from the FIRST message, so the
+    # cost of concurrency is not the tokens, it is the idle time afterwards:
+    # four builders drained a fresh window in about forty minutes and then the
+    # loop had nothing to do for four and a half hours. One builder paces the
+    # same tokens across the window it actually has.
+    #
+    # And this is a coding loop, which is the case Anthropic's own multi-agent
+    # guidance says not to parallelise: "most coding tasks involve fewer truly
+    # parallelizable tasks than research", 3 to 10 times the tokens for
+    # equivalent work, and "sequential phases ... share too much context". This
+    # repo proves it: #139, #143 and #144 all edit app/path/page.tsx, and
+    # lib/db.ts was contended by six open PRs at once.
+    #
+    # docs/CONCURRENCY.md holds the decision tree for when to raise it.
+    max_concurrent_agents: int = 1
     # Per repository, so one busy project cannot take every slot. Raising the
     # global cap without this just moves the starvation rather than fixing it.
     max_concurrent_per_repo: int = 1

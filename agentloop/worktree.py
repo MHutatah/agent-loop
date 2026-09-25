@@ -52,6 +52,10 @@ class Workspace:
     def __init__(self, root: str | Path, repo_slug: str):
         self.repo_slug = repo_slug
         self.key = repo_key(repo_slug)
+        # `shared` is the workspace every repo has in common, and is where
+        # account-wide state belongs: one subscription funds all of them, so a
+        # usage limit seen here has to stop the others too. See cooldown.py.
+        self.shared = Path(root)
         # `root` stays the shared workspace; everything below it is per-repo.
         self.root = Path(root) / "repos" / self.key
         self.clone = self.root / "repo"
@@ -367,7 +371,14 @@ class Workspace:
         git(["push", "-u", "origin", branch, "--force-with-lease"], path)
 
     def active(self) -> list[int]:
-        """Issue numbers with a live worktree — used to cap concurrency."""
+        """Issue numbers that still have a worktree DIRECTORY on disk.
+
+        NOT a concurrency signal, whatever the old name suggests: a tree
+        outlives its agent until the reaper takes it, so this counts history
+        as well as work in progress. Concurrency is capped on
+        tmux.live_windows(), which counts processes. `agentloop status` read
+        this one and reported "agents live: 47/1" with nothing running.
+        """
         if not self.trees.exists():
             return []
         out = []
